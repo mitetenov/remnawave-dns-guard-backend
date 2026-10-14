@@ -1,0 +1,67 @@
+name: remnawave-dns-guard
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  backend:
+    image: ${BACKEND_IMAGE:-mitetenov/remnawave-dns-guard-backend:latest}
+    restart: unless-stopped
+    init: true
+    environment:
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?Set ADMIN_USERNAME in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      APP_SECRET: ${APP_SECRET:?Set APP_SECRET (at least 32 characters) in .env}
+      AGENT_TOKEN: ${AGENT_TOKEN:?Set AGENT_TOKEN (at least 32 characters) in .env}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN to the exact public origin}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      DATABASE_PATH: /data/guard.db
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+      REMNAWAVE_URL: ${REMNAWAVE_URL:-}
+      REMNAWAVE_API_TOKEN: ${REMNAWAVE_API_TOKEN:-}
+    volumes:
+      - guard-data:/data
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: "1.0"
+    mem_limit: 512m
+    pids_limit: 128
+    logging: *logging
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-mitetenov/remnawave-dns-guard-frontend:latest}
+    restart: unless-stopped
+    init: true
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${UI_BIND_ADDRESS:-127.0.0.1}:${UI_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cpus: "0.5"
+    mem_limit: 128m
+    pids_limit: 128
+    logging: *logging
+
+volumes:
+  guard-data:
