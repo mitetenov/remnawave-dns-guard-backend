@@ -44,7 +44,7 @@ class FakeCloudflare:
 def env(tmp_path):
     config=Config('admin','password','S'*32,'T'*32,str(tmp_path/'guard.db'),False,'http://testserver',cloudflare_api_token='hidden-token')
     fake=FakeCloudflare()
-    app=create_app(config,cf_factory=lambda token:fake.adapter)
+    app=create_app(config,cf_factory=lambda token:fake.adapter,background_tasks=False)
     with TestClient(app,headers={'X-Requested-With':'DNSGuard'}) as client:
         assert client.post('/api/auth/login',json={'username':'admin','password':'password'}).status_code==200
         yield client, app.state.store, fake, config
@@ -69,7 +69,9 @@ def poll(client, healthy=True, agent='ru-1'):
     return client.post('/api/agent/poll',headers=AH,json={'agent_id':agent,'version':'1','control_ok':healthy,'control_error':None}).json()['jobs']
 
 def result(client, job, ok, agent='ru-1', error='connection_failed'):
-    return client.post('/api/agent/results',headers=AH,json={'agent_id':agent,'results':[{'job_id':job['job_id'],'ok':ok,'latency_ms':12 if ok else None,'error':None if ok else error}]}).json()['accepted']
+    accepted = client.post('/api/agent/results',headers=AH,json={'agent_id':agent,'results':[{'job_id':job['job_id'],'ok':ok,'latency_ms':12 if ok else None,'error':None if ok else error}]}).json()['accepted']
+    client.app.state.reconciler.run_once()
+    return accepted
 
 def round_(client,p,ok):
     client.post(f"/api/pools/{p['id']}/check")
@@ -106,6 +108,7 @@ def test_final_actual_record_ignores_unrelated_and_duplicate_same_ip(env):
     assert len(f.records)==3
     # An unmanaged A at this exact hostname counts as the remaining record.
     f.unrelated(ip='8.8.4.4',hostname='vpn.example.com')
+    c.app.state.reconciler.scan_pool(p['id'])
     round_(c,p,False)
     assert targets(c,p)[0]['status']=='excluded'
     assert all(r['content']!='1.1.1.1' for r in f.records)
@@ -123,6 +126,7 @@ def test_manual_disable_never_probed_or_restored(env):
         assert all(j['target_id']!=ts[0]['id'] for j in due)
     t=next(t for t in targets(c,p) if t['id']==ts[0]['id'])
     assert t['status']=='disabled' and not t['dns_present'] and not t['manual_enabled']
+    assert c.get('/api/overview').json()['excluded'] == 0
 
 def test_offline_stale_expired_wrong_agent_profile_revision(env):
     c,s,f,_=env;p,ts=setup(c)
@@ -200,7 +204,7 @@ def test_profile_and_streaks_survive_restart(tmp_path):
     cfg=Config('admin','password','S'*32,'T'*32,str(tmp_path/'persistent.db'),False,'http://testserver',cloudflare_api_token='hidden-token')
     fake=FakeCloudflare()
     for iteration in range(2):
-        app=create_app(cfg,cf_factory=lambda token:fake.adapter)
+        app=create_app(cfg,cf_factory=lambda token:fake.adapter,background_tasks=False)
         with TestClient(app,headers={'X-Requested-With':'DNSGuard'}) as c:
             c.post('/api/auth/login',json={'username':'admin','password':'password'})
             if iteration==0:
@@ -231,7 +235,7 @@ def test_remnawave_current_read_only_shapes_and_errors():
 def test_uncertain_delete_then_recovery_after_restart(tmp_path):
     cfg=Config('admin','password','S'*32,'T'*32,str(tmp_path/'restart.db'),False,'http://testserver',cloudflare_api_token='hidden-token')
     fake=FakeCloudflare()
-    app=create_app(cfg,cf_factory=lambda token:fake.adapter)
+    app=create_app(cfg,cf_factory=lambda token:fake.adapter,background_tasks=False)
     with TestClient(app,headers={'X-Requested-With':'DNSGuard'}) as c:
         c.post('/api/auth/login',json={'username':'admin','password':'password'})
         p,ts=setup(c,failure=1,recovery=1)
@@ -245,7 +249,7 @@ def test_uncertain_delete_then_recovery_after_restart(tmp_path):
         # Finish the second job so process restart doesn't leave a lease.
         result(c,jobs[1],True)
     fake.fail=None
-    app=create_app(cfg,cf_factory=lambda token:fake.adapter)
+    app=create_app(cfg,cf_factory=lambda token:fake.adapter,background_tasks=False)
     with TestClient(app,headers={'X-Requested-With':'DNSGuard'}) as c:
         c.post('/api/auth/login',json={'username':'admin','password':'password'})
         round_(c,p,True)
