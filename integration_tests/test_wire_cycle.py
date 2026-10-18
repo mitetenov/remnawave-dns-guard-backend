@@ -30,7 +30,7 @@ def environment(tmp_path, count=8):
     config = Config('admin', 'password', 'S' * 32, 'T' * 32,
                     str(tmp_path / 'wire.db'), False, 'http://testserver',
                     cloudflare_api_token='mock-token')
-    app = create_app(config, cf_factory=lambda token: Cloudflare(token, transport))
+    app = create_app(config, cf_factory=lambda token: Cloudflare(token, transport), background_tasks=False)
     client = TestClient(app, headers={'X-Requested-With': 'DNSGuard'})
     assert client.post('/api/auth/login', json={'username': 'admin', 'password': 'password'}).status_code == 200
     pool = client.post('/api/pools', json={'name': 'Wire test', 'hostname': 'vpn.example.com',
@@ -49,6 +49,7 @@ def environment(tmp_path, count=8):
     async def api(path, body):
         response = client.post(path, headers={'Authorization': f'Bearer {config.agent_token}'}, json=body)
         assert response.status_code == 200, response.text
+        app.state.reconciler.run_once()
         requests.append((path, body, response.json()))
         return response.json()
 

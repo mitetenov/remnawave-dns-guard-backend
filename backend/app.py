@@ -5,21 +5,22 @@ import sqlite3
 import time
 from collections import deque
 from contextlib import asynccontextmanager
+from datetime import datetime
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from .config import Config
-from .models import Login, Settings, PoolCreate, PoolPatch, ProbeProfile, TargetCreate, Poll, Results, public_ipv4
+from .models import Login, Settings, PoolCreate, PoolPatch, ProbeProfile, TargetCreate, Poll, Results
 from .store import Store, uid, iso
-from .integrations import Cloudflare, Remnawave, IntegrationError, LastRecordError
+from .integrations import Cloudflare, Remnawave, IntegrationError, LastRecordError, ProxyConflictError
+from .reconciliation import DNSReconciler, DNS_CHECK_SECONDS, CONTROL_FRESH_SECONDS
 
-CONTROL_FRESH_SECONDS = 90
 LEASE_SECONDS = 180
 INCONCLUSIVE_ERRORS = {'xray_start_failed','xray_config_invalid','invalid_job','control_unhealthy','control_unreachable','proxy_unavailable'}
 KNOWN_ERRORS = {'probe_failed','probe_timeout','xray_start_failed','xray_config_invalid','control_unhealthy','invalid_job','proxy_unavailable','http_error','tls_error','connection_failed','timeout','target_unreachable','tunnel_unreachable'}
 
-def create_app(config=None, cf_factory=None, remna_factory=None):
+def create_app(config=None, cf_factory=None, remna_factory=None, background_tasks=True):
     config = config or Config.from_env()
     config.validate()
     s = Store(config)
@@ -28,10 +29,15 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
 
     @asynccontextmanager
     async def lifespan(app):
-        yield
-        cf_client.close()
-        remna_client.close()
-        s.db.close()
+        if background_tasks:
+            reconciler.start()
+        try:
+            yield
+        finally:
+            reconciler.stop()
+            cf_client.close()
+            remna_client.close()
+            s.db.close()
 
     app = FastAPI(title='DNS Guard', docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.store = s
@@ -47,7 +53,8 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
 
     @app.exception_handler(IntegrationError)
     async def integration_error(request, exc):
-        return JSONResponse(status_code=502, content={'detail': str(exc)})
+        status = 409 if isinstance(exc, (LastRecordError, ProxyConflictError)) else 502
+        return JSONResponse(status_code=status, content={'detail': str(exc)})
 
     @app.exception_handler(sqlite3.IntegrityError)
     async def conflict(request, exc):
@@ -85,18 +92,42 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
         return value
 
     def pool_view(row):
-        return {**{k:v for k,v in row.items() if k not in ('profile','revision')}, 'automation_enabled':bool(row['automation_enabled']), 'profile_configured':bool(row['profile'])}
+        return {**{k:v for k,v in row.items() if k not in ('profile','revision','dns_next_check')}, 'automation_enabled':bool(row['automation_enabled']), 'profile_configured':bool(row['profile'])}
 
-    def target_view(row):
-        return {**{k:v for k,v in row.items() if k not in ('next_due','dns_uncertain','last_agent_id')}, 'manual_enabled':bool(row['manual_enabled']), 'dns_present':bool(row['dns_present'])}
+    def target_view(row, context=None):
+        hidden = {'next_due','last_agent_id','dns_operation_id','dns_previous_enabled','dns_profile_revision','dns_next_retry','dns_action'}
+        value = {k:v for k,v in row.items() if k not in hidden}
+        for key in ('manual_enabled','dns_present','dns_uncertain','dns_drift'):
+            value[key] = bool(value[key])
+        value['dns_pending_action'] = row['dns_action']
+        if context is None:
+            interval = pool(row['pool_id'])['interval_seconds']
+            agent = s.one('SELECT * FROM agents WHERE id=?', (row['last_agent_id'],))
+            now = time.time()
+        else:
+            intervals, agents, now = context
+            interval, agent = intervals[row['pool_id']], agents.get(row['last_agent_id'])
+        expires = datetime.fromisoformat(row['last_checked_at'].replace('Z', '+00:00')).timestamp() + max(LEASE_SECONDS, interval * 3) if row['last_checked_at'] else None
+        value['probe_fresh'] = bool(expires and expires > now and agent and agent['healthy'] and now - agent['last_seen'] <= CONTROL_FRESH_SECONDS)
+        value['last_status'] = row['status']
+        if row['manual_enabled'] and row['last_checked_at'] and not value['probe_fresh']:
+            value['status'] = 'stale'
+        return value
+
+    def target_views(rows):
+        context = ({p['id']:p['interval_seconds'] for p in s.all('SELECT id,interval_seconds FROM pools')},
+                   {a['id']:a for a in s.all('SELECT * FROM agents')}, time.time())
+        return [target_view(row, context) for row in rows]
 
     def cf():
-        token = s.get('cloudflare_api_token')
+        with s.lock:
+            token = s.get('cloudflare_api_token')
         if not token: raise HTTPException(400, 'Configure Cloudflare first')
         return cf_factory(token) if cf_factory else Cloudflare(token, cf_client)
 
     def remna():
-        url, token = s.get('remnawave_url'), s.get('remnawave_api_token')
+        with s.lock:
+            url, token = s.get('remnawave_url'), s.get('remnawave_api_token')
         if not url or not token: raise HTTPException(400, 'Configure Remnawave first')
         return remna_factory(url, token) if remna_factory else Remnawave(url, token, remna_client)
 
@@ -104,17 +135,23 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
         agent = s.one('SELECT * FROM agents ORDER BY last_seen DESC LIMIT 1')
         return {'cloudflare_configured':bool(s.get('cloudflare_api_token')), 'remnawave_configured':bool(s.get('remnawave_url') and s.get('remnawave_api_token')), 'remnawave_url':s.get('remnawave_url'), 'agent_last_seen':iso(agent['last_seen']) if agent else None, 'agent_healthy':bool(agent and agent['healthy'] and time.time()-agent['last_seen'] <= CONTROL_FRESH_SECONDS)}
 
-    def invalidate(target_id):
-        s.db.execute('UPDATE jobs SET consumed=1 WHERE target_id=? AND consumed=0', (target_id,))
+    def dns_provider():
+        try:
+            return cf()
+        except HTTPException as error:
+            raise IntegrationError(str(error.detail)) from None
 
-    def add_target(p, data):
-        if s.one('SELECT id FROM targets WHERE pool_id=? AND ip=?', (p['id'],data.ip)):
-            raise HTTPException(409,'Target IP already enrolled')
-        cf().ensure(p, data.ip, True)
-        id = uid()
-        s.db.execute('INSERT INTO targets (id,pool_id,name,ip,remnawave_uuid) VALUES (?,?,?,?,?)', (id,p['id'],data.name,data.ip,data.remnawave_uuid))
-        s.event('info','manual','Target enrolled and exact A record verified',p['id'],id)
-        return target_view(target(id))
+    reconciler = DNSReconciler(s, dns_provider)
+    app.state.reconciler = reconciler
+
+    def manual_dns(id, action):
+        with reconciler.dns_lock:
+            with s.lock:
+                target(id)
+            reconciler.queue(id, action)
+            reconciler.execute(id, raise_errors=True)
+            with s.lock:
+                return {'ok':True} if action == 'delete' else target_view(target(id))
 
     @app.get('/api/health')
     def health(): return {'ok':True}
@@ -167,30 +204,31 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
     def overview(_=Depends(auth)):
         with s.lock:
             result = settings_view(); result.pop('remnawave_url')
-            result.update(pools=s.one('SELECT COUNT(*) n FROM pools')['n'],targets=s.one('SELECT COUNT(*) n FROM targets')['n'],healthy=s.one("SELECT COUNT(*) n FROM targets WHERE status='healthy'")['n'],excluded=s.one("SELECT COUNT(*) n FROM targets WHERE status IN ('excluded','recovering')")['n'])
+            views = target_views(s.all('SELECT * FROM targets'))
+            result.update(pools=s.one('SELECT COUNT(*) n FROM pools')['n'],targets=len(views),healthy=sum(t['status']=='healthy' and not t['dns_uncertain'] for t in views),excluded=sum(t['manual_enabled'] and not t['dns_present'] and not t['dns_uncertain'] for t in views),stale=sum(t['status']=='stale' for t in views))
             return result
 
     @app.post('/api/integrations/cloudflare/test')
     def test_cf(_=Depends(auth)):
-        with s.lock: cf().zones()
+        cf().zones()
         return {'ok':True,'message':'Cloudflare zone access verified'}
 
     @app.post('/api/integrations/remnawave/test')
     def test_remna(_=Depends(auth)):
-        with s.lock: remna().nodes()
+        remna().nodes()
         return {'ok':True,'message':'Remnawave read access verified'}
 
     @app.get('/api/cloudflare/zones')
     def zones(_=Depends(auth)):
-        with s.lock: return cf().zones()
+        return cf().zones()
 
     @app.get('/api/remnawave/nodes')
     def nodes(_=Depends(auth)):
-        with s.lock: return remna().nodes()
+        return remna().nodes()
 
     @app.get('/api/remnawave/hosts')
     def hosts(_=Depends(auth)):
-        with s.lock: return remna().hosts()
+        return remna().hosts()
 
     @app.get('/api/pools')
     def pools(_=Depends(auth)):
@@ -202,12 +240,13 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
             if data.automation_enabled: raise HTTPException(409,'Save profile and add targets before enabling automation')
             id = uid(); d=data.model_dump()
             s.db.execute('INSERT INTO pools (id,name,hostname,zone_id,ttl,interval_seconds,failure_threshold,recovery_threshold,automation_enabled,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)',(id,d['name'],d['hostname'],d['zone_id'],d['ttl'],d['interval_seconds'],d['failure_threshold'],d['recovery_threshold'],0,iso()))
+            s.db.execute('UPDATE pools SET dns_next_check=? WHERE id=?',(time.time()+DNS_CHECK_SECONDS,id))
             s.event('info','manual','Pool created',id)
             return pool_view(pool(id))
 
     @app.patch('/api/pools/{id}')
     def patch_pool(id: str, data: PoolPatch, _=Depends(auth)):
-        with s.lock:
+        with reconciler.dns_lock, s.lock:
             old = pool(id)
             updates = data.model_dump(exclude_unset=True)
             if any(v is None for v in updates.values()): raise HTTPException(422,'Pool fields cannot be null')
@@ -224,7 +263,7 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
 
     @app.put('/api/pools/{id}/profile')
     def profile(id: str, data: ProbeProfile, _=Depends(auth)):
-        with s.lock:
+        with reconciler.dns_lock, s.lock:
             pool(id)
             s.db.execute('UPDATE pools SET profile=?, revision=revision+1 WHERE id=?',(s.encrypt(data.model_dump()),id))
             s.db.execute('UPDATE jobs SET consumed=1 WHERE target_id IN (SELECT id FROM targets WHERE pool_id=?)',(id,))
@@ -236,63 +275,49 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
     def targets(id: str, _=Depends(auth)):
         with s.lock:
             pool(id)
-            return [target_view(t) for t in s.all('SELECT * FROM targets WHERE pool_id=? ORDER BY name',(id,))]
+            return target_views(s.all('SELECT * FROM targets WHERE pool_id=? ORDER BY name',(id,)))
 
     @app.post('/api/pools/{id}/targets')
     def create_target(id: str, data: TargetCreate, _=Depends(auth)):
-        with s.lock: return add_target(pool(id),data)
+        with reconciler.dns_lock:
+            with s.lock:
+                p = pool(id)
+                existing = s.one('SELECT * FROM targets WHERE pool_id=? AND ip=?', (id,data.ip))
+            if existing:
+                if existing['dns_action'] != 'enroll':
+                    raise HTTPException(409,'Target IP already enrolled')
+                tid = existing['id']
+            else:
+                # A known configuration conflict must not become an enrollment
+                # that can publish later without another explicit user action.
+                adapter = cf()
+                adapter.check_proxy(adapter.address_records(p))
+                with s.transaction():
+                    tid = uid()
+                    s.db.execute('INSERT INTO targets (id,pool_id,name,ip,remnawave_uuid,dns_present) VALUES (?,?,?,?,?,0)', (tid,id,data.name,data.ip,data.remnawave_uuid))
+                    reconciler.queue(tid, 'enroll')
+            return manual_dns(tid, 'enroll')
 
     @app.post('/api/targets/{id}/disable')
     def disable(id: str, _=Depends(auth)):
-        with s.lock:
-            t=target(id); p=pool(t['pool_id'])
-            try: cf().ensure(p,t['ip'],False)
-            except LastRecordError as e: raise HTTPException(409,str(e)) from None
-            invalidate(id)
-            s.db.execute("UPDATE targets SET manual_enabled=0,dns_present=0,dns_uncertain=0,status='disabled',failures=0,successes=0 WHERE id=?",(id,))
-            s.event('warning','manual','Target manually disabled; automatic restore disabled',p['id'],id)
-            return target_view(target(id))
+        return manual_dns(id, 'disable')
 
     @app.post('/api/targets/{id}/enable')
     def enable(id: str, _=Depends(auth)):
-        with s.lock:
-            t=target(id); p=pool(t['pool_id']); cf().ensure(p,t['ip'],True)
-            invalidate(id)
-            s.db.execute("UPDATE targets SET manual_enabled=1,dns_present=1,dns_uncertain=0,status='unknown',failures=0,successes=0,next_due=0 WHERE id=?",(id,))
-            s.event('info','manual','Target manually enabled; A record verified',p['id'],id)
-            return target_view(target(id))
+        return manual_dns(id, 'enable')
 
     @app.delete('/api/targets/{id}')
     def delete(id: str, _=Depends(auth)):
-        with s.lock:
-            t=target(id); p=pool(t['pool_id'])
-            try: cf().ensure(p,t['ip'],False)
-            except LastRecordError as e: raise HTTPException(409,str(e)) from None
-            s.db.execute('DELETE FROM targets WHERE id=?',(id,))
-            s.event('warning','manual','Target removed; exact A record absence verified',p['id'],id)
-            return {'ok':True}
+        return manual_dns(id, 'delete')
 
     @app.post('/api/pools/{id}/sync')
     def sync(id: str, _=Depends(auth)):
         with s.lock:
-            p=pool(id); records=cf().records(p)
-            if any(r.get('proxied') for r in records): raise HTTPException(409,'Disable Cloudflare proxy for all A records at this exact hostname')
-            added=0
-            for record in records:
-                try: ip=public_ipv4(record.get('content',''))
-                except ValueError: continue
-                existing=s.one('SELECT * FROM targets WHERE pool_id=? AND ip=?',(id,ip))
-                if not existing:
-                    tid=uid()
-                    s.db.execute('INSERT INTO targets (id,pool_id,name,ip) VALUES (?,?,?,?)',(tid,id,ip,ip)); added+=1
-            actual_ips={r.get('content') for r in records}
-            for enrolled in s.all('SELECT * FROM targets WHERE pool_id=? AND manual_enabled=1',(id,)):
-                present=enrolled['ip'] in actual_ips
-                status=enrolled['status'] if present else 'excluded'
-                if present and status in ('excluded','recovering'): status='unknown'
-                s.db.execute('UPDATE targets SET dns_present=?,dns_uncertain=0,status=? WHERE id=?',(int(present),status,enrolled['id']))
+            pool(id)
+        added = reconciler.scan_pool(id, adopt=True)
+        with s.lock:
             s.event('info','manual',f'Exact hostname DNS sync complete; adopted {added} targets',id)
-            return {'added':added,'message':'Exact A records adopted; excluded targets retained'}
+        return {'added':added,'message':'Exact A records adopted; excluded targets retained'}
 
     @app.post('/api/pools/{id}/check')
     def check(id: str, _=Depends(auth)):
@@ -314,6 +339,8 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
         with s.lock:
             now=time.time()
             previous=s.one('SELECT * FROM agents WHERE id=?',(data.agent_id,))
+            if previous and now - previous['last_seen'] > CONTROL_FRESH_SECONDS:
+                s.db.execute('UPDATE targets SET failures=0,successes=0,next_due=0 WHERE last_agent_id=?', (data.agent_id,))
             s.db.execute('INSERT INTO agents VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen,healthy=excluded.healthy',(data.agent_id,now,int(data.control_ok)))
             if not previous or bool(previous['healthy']) != data.control_ok:
                 s.event('info' if data.control_ok else 'warning','system','Agent control connectivity healthy' if data.control_ok else 'Agent control connectivity unavailable; probing paused')
@@ -337,7 +364,7 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
 
     @app.post('/api/agent/results', dependencies=[Depends(agent_auth)])
     def results(data: Results):
-        with s.lock:
+        with s.transaction():
             now=time.time(); a=s.one('SELECT * FROM agents WHERE id=?',(data.agent_id,))
             if not a or not a['healthy'] or now-a['last_seen']>CONTROL_FRESH_SECONDS:
                 return {'accepted':0}
@@ -358,26 +385,15 @@ def create_app(config=None, cf_factory=None, remna_factory=None):
                 successes=t['successes']+1 if result.ok else 0
                 error=None if result.ok else (result.error if result.error in KNOWN_ERRORS else 'probe_failed')
                 status=('healthy' if t['dns_present'] and not t['dns_uncertain'] else 'recovering') if result.ok else ('suspect' if t['dns_present'] else 'excluded')
-                present=t['dns_present']
-                uncertain=t['dns_uncertain']
-                if p['automation_enabled']:
-                    try:
-                        if not result.ok and failures>=p['failure_threshold']:
-                            s.db.execute('UPDATE targets SET dns_uncertain=1 WHERE id=?',(t['id'],))
-                            uncertain=1
-                            present=cf().ensure(p,t['ip'],False); status='excluded'; uncertain=0
-                            s.event('warning','dns','Failed target exact A record absence verified',p['id'],t['id'])
-                        elif result.ok and (not present or uncertain) and successes>=p['recovery_threshold']:
-                            s.db.execute('UPDATE targets SET dns_uncertain=1 WHERE id=?',(t['id'],))
-                            uncertain=1
-                            present=cf().ensure(p,t['ip'],True); status='healthy'; uncertain=0
-                            s.event('info','dns','Recovered target exact A record restored and verified',p['id'],t['id'])
-                    except LastRecordError:
-                        status='protected'; present=1; uncertain=0
-                        s.event('warning','dns','Removal prevented: final actual A record preserved',p['id'],t['id'])
-                    except (IntegrationError,HTTPException):
-                        s.event('error','dns','DNS reconciliation failed; state unconfirmed, retry on a future probe',p['id'],t['id'])
-                s.db.execute('UPDATE targets SET failures=?,successes=?,last_checked_at=?,last_latency_ms=?,last_error=?,status=?,dns_present=?,dns_uncertain=?,last_agent_id=? WHERE id=?',(failures,successes,iso(now),result.latency_ms,error,status,int(present),int(uncertain),data.agent_id,t['id']))
+                if not result.ok and t['status'] == 'protected':
+                    status = 'protected'
+                s.db.execute('UPDATE targets SET failures=?,successes=?,last_checked_at=?,last_latency_ms=?,last_error=?,status=?,last_agent_id=? WHERE id=?',(failures,successes,iso(now),result.latency_ms,error,status,data.agent_id,t['id']))
+                manual_pending = t['dns_action'] and not t['dns_action'].startswith('auto_')
+                if p['automation_enabled'] and not manual_pending:
+                    if not result.ok and failures >= p['failure_threshold'] and (t['dns_present'] or t['dns_uncertain']) and status != 'protected':
+                        reconciler.queue(t['id'], 'auto_remove')
+                    elif result.ok and (not t['dns_present'] or t['dns_uncertain']) and successes >= p['recovery_threshold']:
+                        reconciler.queue(t['id'], 'auto_restore')
                 s.event('info' if result.ok else 'warning','check','Probe succeeded' if result.ok else 'Probe failed: '+error,p['id'],t['id'])
             return {'accepted':accepted}
     return app

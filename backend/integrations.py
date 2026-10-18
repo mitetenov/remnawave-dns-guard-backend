@@ -7,6 +7,9 @@ class IntegrationError(Exception):
 class LastRecordError(IntegrationError):
     pass
 
+class ProxyConflictError(IntegrationError):
+    pass
+
 class Cloudflare:
     def __init__(self, token, client=None):
         self.client = client or httpx.Client(base_url='https://api.cloudflare.com/client/v4', timeout=20, follow_redirects=False, trust_env=False)
@@ -44,17 +47,25 @@ class Cloudflare:
             raise IntegrationError('Cloudflare returned an invalid zone response')
         return [{'id': z['id'], 'name': z['name']} for z in rows]
 
-    def records(self, pool):
-        rows = self.pages(f"/zones/{pool['zone_id']}/dns_records", {'type': 'A', 'name': pool['hostname']})
+    def address_records(self, pool):
+        rows = self.pages(f"/zones/{pool['zone_id']}/dns_records", {'name': pool['hostname']})
         if any(not all(isinstance(r.get(k), str) for k in ('id','type','name','content')) for r in rows):
             raise IntegrationError('Cloudflare returned an invalid record response')
-        return [r for r in rows if r.get('type') == 'A' and r.get('name', '').rstrip('.').lower() == pool['hostname']]
+        return [r for r in rows if r['type'] in ('A', 'AAAA') and r['name'].rstrip('.').lower() == pool['hostname']]
+
+    def records(self, pool):
+        return [r for r in self.address_records(pool) if r['type'] == 'A']
+
+    @staticmethod
+    def check_proxy(records):
+        if any(r.get('proxied') for r in records):
+            raise ProxyConflictError('Disable Cloudflare proxy for all A/AAAA records at this exact hostname')
 
     def ensure(self, pool, ip, present):
-        records = self.records(pool)
+        addresses = self.address_records(pool)
+        self.check_proxy(addresses)
+        records = [r for r in addresses if r['type'] == 'A']
         matching = [r for r in records if r.get('content') == ip]
-        if any(r.get('proxied') for r in matching):
-            raise IntegrationError('Disable Cloudflare proxy for this A record before enrolling it')
         if present:
             if not matching:
                 self.request('POST', f"/zones/{pool['zone_id']}/dns_records", json={'type':'A','name':pool['hostname'],'content':ip,'ttl':pool['ttl'],'proxied':False})
@@ -63,7 +74,9 @@ class Cloudflare:
                 raise LastRecordError('The final actual A record must be preserved')
             for record in matching:
                 self.request('DELETE', f"/zones/{pool['zone_id']}/dns_records/{record['id']}")
-        verified = self.records(pool)
+        verified = self.address_records(pool)
+        self.check_proxy(verified)
+        verified = [r for r in verified if r['type'] == 'A']
         exists = any(r.get('content') == ip for r in verified)
         if exists != present:
             raise IntegrationError('Cloudflare DNS change could not be verified; retry later')
