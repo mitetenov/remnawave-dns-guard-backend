@@ -4,7 +4,7 @@ User-approved: Cloudflare A-record round robin; Remnawave integration (current A
 
 ## Architecture
 
-Python 3.12 FastAPI backend, SQLite persisted in /data (one backend instance / one uvicorn worker; serialized DNS reconciliation), React/TypeScript/Vite frontend served by nginx proxying /api, Python + Xray RU agent polling HTTPS. No Sites/Workers deployment. Backend environment: ADMIN_USERNAME, ADMIN_PASSWORD, APP_SECRET (>=32 chars), AGENT_TOKEN (>=32 chars), DATABASE_PATH=/data/guard.db, COOKIE_SECURE=true, PUBLIC_ORIGIN=https://guard.example.com; optional CLOUDFLARE_API_TOKEN, REMNAWAVE_URL, REMNAWAVE_API_TOKEN. Secrets encrypted in SQLite using key derived from APP_SECRET; never returned or logged. App has no default valid credentials.
+Go 1.27.2 net/http backend, SQLite persisted in /data (one backend instance; serialized DNS reconciliation), React/TypeScript/Vite frontend served by nginx proxying /api, Go + Xray RU agent polling HTTPS. No Sites/Workers deployment. Backend environment: ADMIN_USERNAME, ADMIN_PASSWORD, APP_SECRET (>=32 chars), AGENT_TOKEN (>=32 chars), DATABASE_PATH=/data/guard.db, COOKIE_SECURE=true, PUBLIC_ORIGIN=https://guard.example.com; optional CLOUDFLARE_API_TOKEN, REMNAWAVE_URL, REMNAWAVE_API_TOKEN. Secrets encrypted in SQLite using key derived from APP_SECRET; never returned or logged. App has no default valid credentials.
 
 All API JSON fields snake_case; IDs strings; UTC times ISO8601; list responses plain arrays unless specified. Errors {detail:string}. /api/health public. Cookie session auth for UI, HttpOnly/SameSite=Strict, secure configurable for localhost; require exact Origin on browser mutations (use configured PUBLIC_ORIGIN, permit requests without Origin only with X-Requested-With: DNSGuard), frontend always sends X-Requested-With: DNSGuard. Agent uses Authorization: Bearer AGENT_TOKEN, never cookie auth. No wildcard CORS.
 
@@ -42,10 +42,10 @@ Agent env: CONTROL_PLANE_URL required HTTPS (ALLOW_INSECURE_HTTP=true only dev);
 
 ## Repositories
 
-- Backend: https://github.com/mitetenov/remnawave-dns-guard-backend — backend/**, integration_tests/**, Dockerfile, panel Compose, contract and operations documentation.
+- Backend: https://github.com/mitetenov/remnawave-dns-guard-backend — Go root package, cmd/dns-guard, integration_tests/**, Dockerfile, panel Compose, contract and operations documentation.
 - Frontend: https://github.com/mitetenov/remnawave-dns-guard-frontend — src/**, nginx.conf, Dockerfile and UI tests.
-- RU agent: https://github.com/mitetenov/remnawave-dns-guard-agent — probe_agent.py, Xray downloader/validator, tests/**, Dockerfile and agent Compose.
+- RU agent: https://github.com/mitetenov/remnawave-dns-guard-agent — Go agent package, binary entry point, Xray downloader/validator, tests, Dockerfile and agent Compose.
 
-Each repository has its own CI and Docker Hub image. Backend CI checks the agent wire protocol against the agent repository. Published images target Linux AMD64 and carry latest and sha-<full commit SHA> tags. Pull requests only test/build; main publishes after all required checks pass.
+Each repository has its own CI and Docker Hub image. Backend CI checks the agent wire protocol through blackbox API tests, including a legacy SQLite/Fernet fixture. An additional local Go-to-Go HTTP suite uses an explicit local agent checkout without making that repository a runtime or mandatory CI dependency. Production binaries are static Go executables (CGO_ENABLED=0). Existing Python SQLite schemas, Fernet-encrypted settings/profiles (SHA256 APP_SECRET key), session hashes and Python JSON/HMAC auth_revision are preserved. Published images target only Linux AMD64; non-AMD64 Docker builds fail explicitly. Images target Linux AMD64 and carry latest and sha-<full commit SHA> tags. Pull requests only test/build; main publishes after all required checks pass.
 
 Avoid invented fixtures on live dashboard; empty states and real API only. Russian UI, dark navy/teal visual direction, responsive sidebar, status cards, pool/target table, activity feed, forms, settings, meaningful errors/loading states. All operations functional. Test important state-machine failure/recovery/last-record/manual-disable/probe-outage/replay cases and API adapters with mocked HTTP. No live DNS mutations during development.

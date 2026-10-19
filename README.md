@@ -2,10 +2,10 @@
 
 Панель управления Cloudflare A round robin с проверкой VLESS из России. Отдельный RU-агент проверяет каждый публичный IPv4 через Xray, сохраняя SNI и параметры общего inbound. После серии ошибок панель исключает адрес из DNS, продолжает его проверять и возвращает после восстановления. Недоступный сервер тоже даёт ошибку проверки.
 
-Это самостоятельное Docker-приложение: React/nginx → FastAPI → SQLite; RU-агент запускается на другом сервере. Remnawave используется только для чтения узлов и хостов. В этой версии поддерживаются VLESS TCP/XHTTP и REALITY/TLS, IPv4 и DNS-only A-записи. Не поддерживаются произвольные Xray-конфиги, AAAA и Cloudflare Proxy для адресов пула.
+Это самостоятельное Docker-приложение: React/nginx → Go → SQLite; RU-агент запускается на другом сервере. Remnawave используется только для чтения узлов и хостов. В этой версии поддерживаются VLESS TCP/XHTTP и REALITY/TLS, IPv4 и DNS-only A-записи. Не поддерживаются произвольные Xray-конфиги, AAAA и Cloudflare Proxy для адресов пула.
 
 
-Репозиторий содержит FastAPI/SQLite, API-контракт, тесты и Compose панели.
+Репозиторий содержит Go/SQLite, API-контракт, тесты и Compose панели.
 [Фронтенд](https://github.com/mitetenov/remnawave-dns-guard-frontend) и
 [RU-агент](https://github.com/mitetenov/remnawave-dns-guard-agent) находятся в отдельных репозиториях.
 Для запуска используются готовые образы Docker Hub; клонировать UI на сервер не требуется.
@@ -51,7 +51,7 @@ docker compose ps
 curl --fail http://127.0.0.1:8080/api/health
 ```
 
-Панель привязана к `127.0.0.1:8080`; backend не публикует порт на хосте. HTTPS завершается вашим reverse proxy. SQLite хранится в именованном томе `remnawave-dns-guard_guard-data`, путь внутри backend — `/data/guard.db`. Оставьте ровно один экземпляр backend и одного uvicorn worker: SQLite и DNS reconciliation рассчитаны на такую схему.
+Панель привязана к `127.0.0.1:8080`; backend не публикует порт на хосте. HTTPS завершается вашим reverse proxy. SQLite хранится в именованном томе `remnawave-dns-guard_guard-data`, путь внутри backend — `/data/guard.db`. Оставьте ровно один экземпляр backend: SQLite и DNS reconciliation рассчитаны на такую схему.
 
 Для осознанной локальной разработки можно установить `PUBLIC_ORIGIN=http://localhost:8080` и `COOKIE_SECURE=false`, затем открыть именно этот адрес. Для удалённой панели нужен HTTPS. Не публикуйте HTTP порт в Интернет.
 
@@ -148,19 +148,34 @@ Compose ограничивает CPU, память, число процессо�
 
 [Резервное копирование и восстановление](docs/backup.md) • [Проверки, ограничения и диагностика](docs/testing.md)
 
+## Разработка и сборка
+
+Нужен Go 1.27.2. Бэкенд — один статически собранный бинарный файл без Python, libc и shell в runtime. SQLite-драйвер `modernc.org/sqlite` закреплён в `go.mod`/`go.sum`.
+
+```sh
+go test -race ./...
+go build -o dns-guard-backend ./cmd/dns-guard
+# Загрузите свои переменные окружения, затем:
+./dns-guard-backend
+```
+
+`LISTEN_ADDR` по умолчанию `:8000`; для локального запуска можно задать `127.0.0.1:8000`. Go-модуль допускает нативную разработку на macOS, но Docker-образы поддерживаются и собираются **только для Linux AMD64**. Сборка Docker для ARM завершается ошибкой. Runtime использует UID/GID `10001`, сертификаты CA и записываемый `/data`; проверка здоровья — `/dns-guard --healthcheck`.
+
+Существующая SQLite, Fernet-шифрование настроек/профилей и версия учётных данных совместимы с Python-версией. При сохранённых `APP_SECRET` и учётных данных действующие сессии продолжают работать после обычного обновления. Миграция добавляет отсутствующие колонки. Перед заменой образа сохраните согласованную резервную копию.
+
 ## Сборка и CI
 
 Локальная сборка из корня этого репозитория:
 
 ```sh
-docker build -t remnawave-dns-guard-backend:local .
+docker build --platform linux/amd64 -t remnawave-dns-guard-backend:local .
 python3 scripts/smoke_image.py remnawave-dns-guard-backend:local
 ```
 
-Каждый push и pull request запускает Python-тесты, интеграцию API с агентом,
-проверку Compose, сборку и smoke-тест запущенного образа. CI берёт агент из
-отдельного публичного репозитория; по умолчанию используется `main`.
-Для проверки закреплённой версии задайте repository variable `AGENT_REF` (commit SHA).
+Dockerfile сначала копирует `go.mod`/`go.sum` и загружает зависимости, затем — только production-код. Изменения тестов и документации не сбрасывают кеш сборки. BuildKit сохраняет кеш компилятора Go между сборками на одном builder; зависимости также остаются обычным слоем, доступным для CI-кеша `type=gha,mode=max`. Cache mounts сами по себе в GitHub layer cache не экспортируются. В scratch стабильные CA/каталоги и часто меняющийся бинарник разделены независимыми `COPY --link` слоями.
+
+Каждый push и pull request запускает Go-тесты с race detector, проверку совместимости старой SQLite и API/протокола агента,
+проверку Compose, сборку и smoke-тест запущенного образа. Реальный обмен Go-агента с Go-бэкендом дополнительно проверяется локально командой из [инструкции](docs/testing.md); отдельный репозиторий агента не является runtime-зависимостью backend.
 После всех проверок `main` публикует AMD64-образ
 `mitetenov/remnawave-dns-guard-backend` с тегами `latest` и `sha-<полный commit SHA>`.
 Pull request не публикует образы; deploy автоматически не выполняется.

@@ -1,69 +1,38 @@
 # Резервная копия SQLite
 
-База содержит настройки, цели, состояние, журнал и зашифрованные секреты. Храните копии и соответствующий `APP_SECRET` отдельно от сервера, с ограниченным доступом. SQLite backup API ниже создаёт согласованный снимок, включая данные WAL; копировать один `guard.db` во время работы нельзя.
+База содержит настройки, цели, сессии, состояние, журнал и зашифрованные секреты. Храните копии и соответствующий `APP_SECRET` отдельно от сервера с ограниченным доступом. Бинарный файл поддерживает согласованный SQLite `VACUUM INTO`, включая данные WAL. Копировать только работающий `guard.db` нельзя.
 
 ## Копирование работающего backend
 
-Из корня проекта:
+Из корня проекта запустите одноразовый контейнер с тем же томом. Текущий backend может продолжать работать. Имя `dns-guard-backup` должно быть свободно:
 
 ```sh
 mkdir -p backups
 chmod 700 backups
-docker compose exec -T backend python - <<'PY'
-import os, sqlite3
-path = '/tmp/guard-backup.db'
-if os.path.exists(path):
-    os.unlink(path)
-fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-os.close(fd)
-source = sqlite3.connect('file:/data/guard.db?mode=ro', uri=True)
-backup = sqlite3.connect(path)
-source.backup(backup)
-assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
-backup.close()
-source.close()
-os.chmod(path, 0o600)
-PY
-docker compose cp backend:/tmp/guard-backup.db backups/guard-backup.db
+docker compose run --name dns-guard-backup --no-deps -T backend --backup /tmp/guard-backup.db
+docker cp dns-guard-backup:/tmp/guard-backup.db backups/guard-backup.db
 chmod 600 backups/guard-backup.db
-docker compose exec -T backend rm /tmp/guard-backup.db
+docker rm dns-guard-backup
 ```
 
-Команда перезаписывает `backups/guard-backup.db`: перед повторным запуском переименуйте прошлую копию. Проверьте размер и храните версии с датой. Защищённую копию `.env` (или секреты в менеджере секретов) храните отдельно; она нужна для восстановления `APP_SECRET`, доступа администратора и токена агента. Резервная копия БД сама не откатывает уже выполненные изменения Cloudflare DNS.
+Перед повторной командой переименуйте прежнюю копию на хосте: `docker cp` может её заменить. Проверяйте размер и храните версии с датой. Внутри контейнера backup отказывается перезаписывать существующий файл, создаёт копию с правами `0600` и проверяет `PRAGMA integrity_check`. Python и shell в runtime не нужны. Если создание копии завершилось ошибкой, удалите только одноразовый контейнер `docker rm dns-guard-backup` и выясните причину.
+
+Защищённая копия `.env` или секреты в менеджере секретов нужны для восстановления `APP_SECRET`, доступа администратора и токена агента. Смена `APP_SECRET` не расшифрует прежние данные. Резервная копия БД не откатывает уже выполненные изменения Cloudflare.
 
 ## Восстановление
 
-Сначала сделайте новую копию текущего состояния. Используйте доверенный проверенный файл `backups/guard-backup.db`, исходный `APP_SECRET` и совместимую версию исходников. Команды ниже **заменяют БД**; backend должен быть остановлен, другой экземпляр не должен писать в тот же том. **Перед восстановлением остановите RU-агент** на его хосте (`docker compose stop agent`), чтобы автоматические DNS-операции из старого снимка не начались до вашей проверки.
+Сначала сделайте копию текущего состояния. Используйте доверенный файл `backups/guard-backup.db` и исходный `APP_SECRET`. Команды **заменяют БД**: backend должен быть остановлен, другой экземпляр не должен писать в том. Сначала остановите RU-агент на его сервере (`docker compose stop agent`), чтобы операции старого снимка не начались до вашей проверки.
 
 ```sh
 docker compose stop backend
 docker compose run --rm --no-deps -T --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE \
-  -v "$PWD/backups:/backup:ro" backend python - <<'PY'
-import os, sqlite3
-source = sqlite3.connect('file:/backup/guard-backup.db?mode=ro', uri=True)
-if source.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
-    raise SystemExit('Backup integrity check failed; current database was not touched')
-staged = '/data/guard-restore.db'
-if os.path.exists(staged):
-    os.unlink(staged)
-fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-os.close(fd)
-restored = sqlite3.connect(staged)
-source.backup(restored)
-if restored.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
-    raise SystemExit('Restored database integrity check failed')
-restored.close()
-source.close()
-os.chown(staged, 10001, 10001)
-for path in ('/data/guard.db-wal', '/data/guard.db-shm'):
-    if os.path.exists(path):
-        os.unlink(path)
-os.replace(staged, '/data/guard.db')
-PY
+  -v "$PWD/backups:/backup:ro" backend --restore /backup/guard-backup.db
 docker compose start backend
 curl --fail http://127.0.0.1:8080/api/health
 ```
 
-Backend работает с UID/GID `10001`. Для bind mount вместо стандартного именованного тома обеспечьте права этого пользователя на `/data`. Одноразовый контейнер восстановления выше использует root с CHOWN/DAC_OVERRIDE для чтения защищённой копии и восстановления владельца БД; обычный backend продолжает работать непривилегированно. Для именованного тома права `/data` берутся из образа при первом создании. До замены база проверяется во временном файле; остановленный backend остаётся необходимым условием. При ошибке восстановления backend не запускайте до выяснения причины.
+Одноразовый root-контейнер читает защищённый backup, проверяет целостность, создаёт и проверяет временную копию в `/data`, назначает владельца `10001:10001`, затем заменяет файл и удаляет старые WAL/SHM. Проверка повреждённой копии завершается до изменения текущей базы. Обычный backend работает с UID/GID `10001`. Если восстановление вернуло ошибку, не запускайте backend до выяснения причины.
 
-После запуска войдите в UI, поставьте автоматику пулов на паузу, проверьте интеграции и реальное DNS, затем включайте её осознанно. Старый снимок может не соответствовать текущему Cloudflare; восстановление конфигурации само по себе не восстанавливает DNS-зону. После проверки верните RU-агент командой `docker compose start agent` на его хосте.
+Для bind mount обеспечьте права UID 10001 на каталог `/data`. Не запускайте второй backend на одной БД и не выполняйте `docker compose down -v`, если хотите сохранить данные.
+
+После восстановления войдите в UI, поставьте автоматику на паузу, проверьте интеграции и фактический DNS. Старый снимок может отличаться от текущей зоны. Только после проверки возвращайте RU-агент и автоматику.

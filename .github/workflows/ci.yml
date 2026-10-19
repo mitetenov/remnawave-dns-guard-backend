@@ -20,24 +20,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Checkout agent for protocol integration
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          repository: mitetenov/remnawave-dns-guard-agent
-          ref: ${{ vars.AGENT_REF || 'main' }}
-          path: agent
-          persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: "**/requirements*.txt"
-      - name: Install test dependencies
-        run: python -m pip install -r backend/requirements-dev.txt -r agent/requirements.txt
-      - name: Run backend tests
-        run: python -m pytest backend/tests -q
-      - name: Run backend-agent protocol integration
-        run: python -m pytest integration_tests -q
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Vet Go sources
+        run: go vet ./...
+      - name: Run Go tests with race detection
+        run: go test -race -count=1 ./...
+      - name: Build backend for HTTP contract checks
+        run: go build -o /tmp/dns-guard-backend ./cmd/dns-guard
+      - name: Check HTTP and legacy SQLite compatibility
+        env:
+          DNS_GUARD_BACKEND_BINARY: /tmp/dns-guard-backend
+        run: python3 -m unittest discover -s integration_tests -v
 
   compose-validation:
     runs-on: ubuntu-latest
@@ -66,6 +62,8 @@ jobs:
           tags: dns-guard-backend:ci
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
+      - name: Require AMD64 image
+        run: test "$(docker image inspect dns-guard-backend:ci --format '{{.Architecture}}')" = amd64
       - name: Check running image
         run: python3 scripts/smoke_image.py dns-guard-backend:ci
 

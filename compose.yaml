@@ -9,6 +9,7 @@ x-logging: &logging
 services:
   backend:
     image: ${BACKEND_IMAGE:-mitetenov/remnawave-dns-guard-backend:latest}
+    platform: linux/amd64
     restart: unless-stopped
     init: true
     environment:
@@ -27,7 +28,7 @@ services:
     expose:
       - "8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"]
+      test: ["CMD", "/dns-guard", "--healthcheck"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -43,6 +44,7 @@ services:
 
   frontend:
     image: ${FRONTEND_IMAGE:-mitetenov/remnawave-dns-guard-frontend:latest}
+    platform: linux/amd64
     restart: unless-stopped
     init: true
     depends_on:
