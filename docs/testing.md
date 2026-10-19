@@ -30,7 +30,7 @@ docker build --platform linux/amd64 -t remnawave-dns-guard-backend:local .
 python3 scripts/smoke_image.py remnawave-dns-guard-backend:local
 ```
 
-`config --quiet` проверяет Compose без печати секретов. Обычный `docker compose config` раскрывает секреты. Образы поддерживают только Linux AMD64; Docker-сборка для ARM завершается ошибкой. На ARM-компьютере для image smoke нужен Docker с эмуляцией AMD64.
+Для проверки Compose рядом с `docker-compose.yaml` нужен `.env`: backend загружает его через `env_file`. `config --quiet` проверяет наличие файла и структуру Compose без печати секретов; обязательные значения приложения backend проверяет при запуске. Обычный `docker compose config` раскрывает секреты. Образы поддерживают только Linux AMD64; Docker-сборка для ARM завершается ошибкой. На ARM-компьютере для image smoke нужен Docker с эмуляцией AMD64.
 
 В каждом репозитории отдельный CI. Backend проверяет Go-тесты, старый формат БД/API и протокол агента внешними HTTP-тестами, Compose и собранный AMD64-образ: health, вход, poll, непривилегированный UID, сохранение сессии после restart и SQLite integrity. Агент проверяет Go-тесты, Compose и профили настоящим Xray. Frontend проверяет Vitest, TypeScript/Vite build и nginx с тестовым upstream. После успешных проверок `main` публикует только AMD64-образ с тегами `latest` и `sha-<полный commit SHA>`. PR не публикует образы. Deploy не выполняется.
 
@@ -44,7 +44,7 @@ Image smoke требует работающий Docker Engine. Локальны�
 
 | Симптом | Что проверить |
 | --- | --- |
-| Compose сообщает обязательную переменную | `.env` и обязательные поля |
+| Compose сообщает, что env file не найден | `.env` рядом с `docker-compose.yaml` |
 | Backend не запускается | Секреты, `PUBLIC_ORIGIN`, права UID 10001 на `/data`, целостность SQLite и прежний `APP_SECRET` |
 | Login/изменения дают 403 | Точный Origin, secure Cookie через HTTPS, сохранение заголовков proxy |
 | Зоны Cloudflare не видны | `Zone Read` + `DNS Edit`, разрешённая зона |
