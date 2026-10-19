@@ -192,7 +192,7 @@ func (s *Store) initialize(c Config) (err error) {
  CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, target_id TEXT REFERENCES targets(id) ON DELETE CASCADE, agent_id TEXT, revision INTEGER, issued REAL, expires REAL, consumed INTEGER DEFAULT 0);
  CREATE UNIQUE INDEX IF NOT EXISTS target_active_job ON jobs(target_id) WHERE consumed=0;
  CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, created_at TEXT, level TEXT, type TEXT, message TEXT, pool_id TEXT, target_id TEXT);`)
-	migrations := map[string]map[string]string{"targets": {"dns_uncertain": "INTEGER DEFAULT 0", "last_agent_id": "TEXT", "dns_action": "TEXT", "dns_operation_id": "TEXT", "dns_previous_enabled": "INTEGER", "dns_profile_revision": "INTEGER", "dns_next_retry": "REAL DEFAULT 0", "dns_error": "TEXT", "dns_checked_at": "TEXT", "dns_drift": "INTEGER DEFAULT 0"}, "pools": {"dns_checked_at": "TEXT", "dns_error": "TEXT", "dns_next_check": "REAL DEFAULT 0", "dns_drift_count": "INTEGER DEFAULT 0"}}
+	migrations := map[string]map[string]string{"targets": {"dns_uncertain": "INTEGER DEFAULT 0", "last_agent_id": "TEXT", "dns_new_ip": "TEXT", "dns_replace_present": "INTEGER", "dns_action": "TEXT", "dns_operation_id": "TEXT", "dns_previous_enabled": "INTEGER", "dns_profile_revision": "INTEGER", "dns_next_retry": "REAL DEFAULT 0", "dns_error": "TEXT", "dns_checked_at": "TEXT", "dns_drift": "INTEGER DEFAULT 0"}, "pools": {"dns_checked_at": "TEXT", "dns_error": "TEXT", "dns_next_check": "REAL DEFAULT 0", "dns_drift_count": "INTEGER DEFAULT 0"}}
 	for table, columns := range migrations {
 		existing := map[string]bool{}
 		for _, r := range s.all("PRAGMA table_info(" + table + ")") {

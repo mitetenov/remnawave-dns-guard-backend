@@ -71,7 +71,7 @@ func (a *App) agentRoutes() {
 					s.exec("UPDATE jobs SET consumed=1 WHERE agent_id=? AND consumed=0", data.AgentID)
 					return
 				}
-				for _, t := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id WHERE manual_enabled=1 AND profile IS NOT NULL AND next_due<=? AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND consumed=0) ORDER BY next_due,targets.id", now) {
+				for _, t := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id WHERE manual_enabled=1 AND profile IS NOT NULL AND next_due<=? AND (dns_action IS NULL OR dns_action!='replace_ip') AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND consumed=0) ORDER BY next_due,targets.id", now) {
 					if len(jobs) == 4 {
 						break
 					}

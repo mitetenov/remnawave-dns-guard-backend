@@ -9,6 +9,7 @@ import (
 var poolFields = []string{"name", "hostname", "zone_id", "ttl", "interval_seconds", "failure_threshold", "recovery_threshold", "automation_enabled"}
 
 func (a *App) poolRoutes() {
+	a.managementRoutes()
 	a.route("GET /api/pools", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
 			out := []row{}
@@ -127,7 +128,7 @@ func (a *App) poolRoutes() {
 		var p, existing row
 		a.withStore(func() any {
 			p = a.pool(id)
-			existing = a.s.one("SELECT * FROM targets WHERE pool_id=? AND ip=?", id, data.IP)
+			existing = a.s.one("SELECT * FROM targets WHERE pool_id=? AND (ip=? OR dns_new_ip=?)", id, data.IP, data.IP)
 			return nil
 		})
 		tid := ""

@@ -172,7 +172,11 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 	provider, e := r.provider()
 	actual := false
 	if e == nil {
-		actual, e = provider.ensure(p, str(t["ip"]), present)
+		if action == "replace_ip" {
+			actual, e = provider.replaceIP(p, str(t["ip"]), str(t["dns_new_ip"]), truth(t["dns_replace_present"]))
+		} else {
+			actual, e = provider.ensure(p, str(t["ip"]), present)
+		}
 	}
 	if e != nil {
 		ie, ok := e.(*IntegrationError)
@@ -186,7 +190,7 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 			if current == nil || current["dns_operation_id"] != operation {
 				return
 			}
-			if ie.Kind == "last_record" {
+			if ie.Kind == "last_record" && action != "replace_ip" {
 				enabled := current["manual_enabled"]
 				if !strings.HasPrefix(action, "auto_") {
 					enabled = current["dns_previous_enabled"]
@@ -225,6 +229,19 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 		if action == "delete" {
 			s.exec("DELETE FROM targets WHERE id=?", targetID)
 			s.event("warning", "manual", "Target removed; exact A record absence verified", p["id"], targetID)
+			return
+		}
+		if action == "replace_ip" {
+			status := "disabled"
+			if truth(current["manual_enabled"]) {
+				status = "excluded"
+				if actual {
+					status = "unknown"
+				}
+			}
+			s.exec("UPDATE targets SET ip=dns_new_ip,dns_new_ip=NULL,dns_replace_present=NULL,dns_present=?,dns_uncertain=0,dns_action=NULL,dns_error=NULL,dns_checked_at=?,dns_drift=0,status=?,failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,last_agent_id=NULL WHERE id=?", actual, iso(time.Now()), status, targetID)
+			s.exec("UPDATE jobs SET consumed=1 WHERE target_id=?", targetID)
+			s.event("info", "manual", "Target IP updated; DNS verified and probe counters reset", p["id"], targetID)
 			return
 		}
 		status := observedStatus(current, actual, false)
@@ -293,7 +310,7 @@ func (r *Reconciler) scanPool(poolID string, adopt bool) (int, error) {
 	s.transaction(func() {
 		if adopt {
 			for ip := range actual {
-				if publicIPv4(ip) && s.one("SELECT id FROM targets WHERE pool_id=? AND ip=?", poolID, ip) == nil {
+				if publicIPv4(ip) && s.one("SELECT id FROM targets WHERE pool_id=? AND (ip=? OR dns_new_ip=?)", poolID, ip, ip) == nil {
 					s.exec("INSERT INTO targets (id,pool_id,name,ip) VALUES (?,?,?,?)", uid(), poolID, ip, ip)
 					added++
 				}
@@ -303,6 +320,9 @@ func (r *Reconciler) scanPool(poolID string, adopt bool) (int, error) {
 		managed := map[string]bool{}
 		for _, t := range enrolled {
 			managed[str(t["ip"])] = true
+			if ip := str(t["dns_new_ip"]); ip != "" {
+				managed[ip] = true
+			}
 		}
 		driftCount := 0
 		for ip := range actual {

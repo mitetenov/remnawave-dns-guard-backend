@@ -266,7 +266,7 @@ func (a *App) targetViews(rows []row) []row {
 	for _, t := range rows {
 		value := row{}
 		for k, v := range t {
-			if !oneOf(k, "next_due", "last_agent_id", "dns_operation_id", "dns_previous_enabled", "dns_profile_revision", "dns_next_retry", "dns_action") {
+			if !oneOf(k, "next_due", "last_agent_id", "dns_operation_id", "dns_previous_enabled", "dns_profile_revision", "dns_next_retry", "dns_action", "dns_new_ip", "dns_replace_present") {
 				value[k] = v
 			}
 		}
@@ -333,7 +333,13 @@ func (a *App) remnawave() *Remnawave {
 }
 func (a *App) manualDNSLocked(id, action string) any {
 	a.s.mu.Lock()
-	func() { defer a.s.mu.Unlock(); a.target(id); a.reconciler.queueLocked(id, action) }()
+	func() {
+		defer a.s.mu.Unlock()
+		if a.target(id)["dns_action"] == "replace_ip" {
+			fail(409, "Дождитесь завершения смены IP узла")
+		}
+		a.reconciler.queueLocked(id, action)
+	}()
 	mustErr(a.reconciler.executeLocked(id, true))
 	return a.withStore(func() any {
 		if action == "delete" {
