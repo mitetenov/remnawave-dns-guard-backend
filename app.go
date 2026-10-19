@@ -43,14 +43,15 @@ type Options struct {
 	BackgroundTasks bool
 }
 type App struct {
-	config        Config
-	s             *Store
-	reconciler    *Reconciler
-	client        *http.Client
-	mux           *http.ServeMux
-	loginFailures []float64
-	closeOnce     sync.Once
-	closeErr      error
+	config             Config
+	s                  *Store
+	reconciler         *Reconciler
+	client             *http.Client
+	subscriptionClient *http.Client
+	mux                *http.ServeMux
+	loginFailures      []float64
+	closeOnce          sync.Once
+	closeErr           error
 }
 
 func New(c Config, options Options) (*App, error) {
@@ -62,6 +63,7 @@ func New(c Config, options Options) (*App, error) {
 		return nil, e
 	}
 	a := &App{config: c, s: s, client: providerClient(options.Client), mux: http.NewServeMux(), loginFailures: []float64{}}
+	a.subscriptionClient = newSubscriptionClient()
 	a.reconciler = newReconciler(s, a.dnsProvider)
 	a.routes()
 	if options.BackgroundTasks {
@@ -93,7 +95,12 @@ func (a *App) Handler() http.Handler {
 	})
 }
 func (a *App) Close() error {
-	a.closeOnce.Do(func() { a.reconciler.close(); a.client.CloseIdleConnections(); a.closeErr = a.s.db.Close() })
+	a.closeOnce.Do(func() {
+		a.reconciler.close()
+		a.client.CloseIdleConnections()
+		a.subscriptionClient.CloseIdleConnections()
+		a.closeErr = a.s.db.Close()
+	})
 	return a.closeErr
 }
 func (a *App) RunOnce() { a.reconciler.runOnce() }
@@ -468,6 +475,7 @@ func (a *App) routes() {
 		return rows
 	})
 	a.poolRoutes()
+	a.subscriptionRoutes()
 	a.agentRoutes()
 	a.route("GET /api/events", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		limit := 100
