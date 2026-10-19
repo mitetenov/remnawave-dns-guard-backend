@@ -27,3 +27,5 @@ agent
 integration_tests
 scripts
 docs
+**/*_test.go
+**/*.md

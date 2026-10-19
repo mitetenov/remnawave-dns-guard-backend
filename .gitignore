@@ -25,3 +25,7 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 /agent/
+
+/dns-guard-backend
+/dns-guard
+*.test

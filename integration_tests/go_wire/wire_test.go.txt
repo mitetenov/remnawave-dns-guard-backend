@@ -1,0 +1,271 @@
+//go:build wire
+
+package wire_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	agent "github.com/mitetenov/remnawave-dns-guard-agent"
+	guard "github.com/mitetenov/remnawave-dns-guard-backend"
+)
+
+type provider struct {
+	sync.Mutex
+	records []map[string]any
+	next    int
+}
+
+func (p *provider) RoundTrip(r *http.Request) (*http.Response, error) {
+	p.Lock()
+	defer p.Unlock()
+	var result any
+	switch r.Method {
+	case "GET":
+		rows := make([]map[string]any, 0, len(p.records))
+		for _, row := range p.records {
+			rows = append(rows, row)
+		}
+		result = rows
+	case "POST":
+		row := map[string]any{}
+		if err := json.NewDecoder(r.Body).Decode(&row); err != nil {
+			return nil, err
+		}
+		p.next++
+		row["id"] = fmt.Sprint(p.next)
+		p.records = append(p.records, row)
+		result = row
+	case "DELETE":
+		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		rows := p.records[:0]
+		for _, row := range p.records {
+			if row["id"] != id {
+				rows = append(rows, row)
+			}
+		}
+		p.records = rows
+		result = map[string]any{}
+	default:
+		return nil, fmt.Errorf("unexpected provider method %s", r.Method)
+	}
+	body, _ := json.Marshal(map[string]any{"success": true, "result": result, "result_info": map[string]any{"total_pages": 1}})
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body)), Request: r}, nil
+}
+
+type target struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	DNS       bool   `json:"dns_present"`
+	Failures  int    `json:"failures"`
+	Successes int    `json:"successes"`
+}
+type fixture struct {
+	t       *testing.T
+	app     *guard.App
+	server  *httptest.Server
+	client  *http.Client
+	agent   *agent.Agent
+	pool    string
+	mu      sync.Mutex
+	results int
+}
+
+func (f *fixture) request(method, path string, body any, out any) {
+	f.t.Helper()
+	var data io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		data = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequest(method, f.server.URL+path, data)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	req.Header.Set("Origin", "http://wire.test")
+	req.Header.Set("X-Requested-With", "DNSGuard")
+	req.Header.Set("Content-Type", "application/json")
+	response, err := f.client.Do(req)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer response.Body.Close()
+	raw, _ := io.ReadAll(response.Body)
+	if response.StatusCode != 200 {
+		f.t.Fatalf("%s %s: %d %s", method, path, response.StatusCode, raw)
+	}
+	if out != nil {
+		if err := json.Unmarshal(raw, out); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+}
+func setup(t *testing.T, count int, automatic bool) *fixture {
+	t.Helper()
+	cf := &provider{}
+	app, err := guard.New(guard.Config{Username: "admin", Password: "password", AppSecret: strings.Repeat("S", 32), AgentToken: strings.Repeat("T", 32), DatabasePath: filepath.Join(t.TempDir(), "wire.db"), PublicOrigin: "http://wire.test", CloudflareAPIToken: "synthetic"}, guard.Options{Client: &http.Client{Transport: cf, Timeout: time.Second}, BackgroundTasks: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fixture{t: t, app: app}
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/agent/results" {
+			f.mu.Lock()
+			f.results++
+			f.mu.Unlock()
+		}
+		app.Handler().ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() { f.server.Close(); app.Close() })
+	jar, _ := cookiejar.New(nil)
+	f.client = &http.Client{Jar: jar, Timeout: 5 * time.Second}
+	f.request("POST", "/api/auth/login", map[string]any{"username": "admin", "password": "password"}, nil)
+	var pool map[string]any
+	f.request("POST", "/api/pools", map[string]any{"name": "Wire", "hostname": "vpn.example.com", "zone_id": "zone"}, &pool)
+	f.pool = pool["id"].(string)
+	f.request("PUT", "/api/pools/"+f.pool+"/profile", map[string]any{"port": 443, "uuid": "550e8400-e29b-41d4-a716-446655440000", "transport": "tcp", "security": "tls", "server_name": "example.com"}, nil)
+	for i := range count {
+		f.request("POST", "/api/pools/"+f.pool+"/targets", map[string]any{"name": fmt.Sprint(i), "ip": fmt.Sprintf("8.8.8.%d", i+1)}, nil)
+	}
+	if automatic {
+		f.request("PATCH", "/api/pools/"+f.pool, map[string]any{"automation_enabled": true, "failure_threshold": 1}, nil)
+	}
+	settings := agent.DefaultSettings()
+	settings.ControlPlaneURL = f.server.URL
+	settings.Token = strings.Repeat("T", 32)
+	settings.AgentID = "wire-go"
+	settings.AllowInsecureHTTP = true
+	f.agent, err = agent.New(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.agent.HeartbeatFile = filepath.Join(t.TempDir(), "heartbeat")
+	f.agent.LogReason = func(string) {}
+	f.agent.CheckControls = func(context.Context) bool { return true }
+	return f
+}
+func (f *fixture) targets() []target {
+	f.t.Helper()
+	var result []target
+	f.request("GET", "/api/pools/"+f.pool+"/targets", nil, &result)
+	return result
+}
+func (f *fixture) cycle() {
+	f.t.Helper()
+	delay, err := f.agent.Cycle(context.Background())
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if delay != 10*time.Second {
+		f.t.Fatalf("poll delay=%s", delay)
+	}
+	f.app.RunOnce()
+}
+
+func TestEightTargetsInTwoGoAgentCycles(t *testing.T) {
+	f := setup(t, 8, false)
+	var seen sync.Map
+	f.agent.Probe = func(_ context.Context, job agent.Job) agent.Result {
+		if _, exists := seen.LoadOrStore(job.TargetID, true); exists {
+			t.Errorf("duplicate target lease %s", job.TargetID)
+		}
+		latency := 12.5
+		return agent.Result{JobID: job.JobID, OK: true, LatencyMS: &latency}
+	}
+	f.cycle()
+	f.cycle()
+	ts := f.targets()
+	if len(ts) != 8 {
+		t.Fatalf("targets=%d", len(ts))
+	}
+	for _, target := range ts {
+		if target.Successes != 1 || target.Failures != 0 || !target.DNS || target.Status != "healthy" {
+			t.Errorf("unexpected target %+v", target)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.results != 2 {
+		t.Fatalf("result batches=%d", f.results)
+	}
+}
+func TestControlLossSuppressesGoAgentResults(t *testing.T) {
+	f := setup(t, 2, true)
+	checks := 0
+	f.agent.CheckControls = func(context.Context) bool { checks++; return checks == 1 }
+	f.agent.Probe = func(_ context.Context, job agent.Job) agent.Result {
+		reason := "probe_timeout"
+		return agent.Result{JobID: job.JobID, Error: &reason}
+	}
+	f.cycle()
+	for _, target := range f.targets() {
+		if target.Failures != 0 || !target.DNS {
+			t.Errorf("control outage affected target %+v", target)
+		}
+	}
+	f.mu.Lock()
+	resultBatches := f.results
+	f.mu.Unlock()
+	if resultBatches != 0 {
+		t.Fatalf("submitted %d result batches", resultBatches)
+	}
+	var overview map[string]any
+	f.request("GET", "/api/overview", nil, &overview)
+	if overview["agent_healthy"] != false {
+		t.Fatal("lost control heartbeat remained healthy")
+	}
+}
+func TestMissingXrayRemainsInconclusiveAcrossGoServices(t *testing.T) {
+	f := setup(t, 2, true)
+	f.agent.Settings.XrayBin = filepath.Join(t.TempDir(), "missing-xray")
+	for range 2 {
+		f.request("POST", "/api/pools/"+f.pool+"/check", map[string]any{}, nil)
+		f.cycle()
+	}
+	for _, target := range f.targets() {
+		if target.Failures != 0 || !target.DNS || target.Successes != 0 {
+			t.Errorf("missing local runtime affected target %+v", target)
+		}
+	}
+}
+
+func TestUnicodeProfileAndPublicIPv4ExceptionsAgreeAcrossServices(t *testing.T) {
+	f := setup(t, 0, false)
+	path := "/" + strings.Repeat("я", 1500)
+	f.request("PUT", "/api/pools/"+f.pool+"/profile", map[string]any{
+		"port": 443, "uuid": "550e8400-e29b-41d4-a716-446655440000",
+		"transport": "xhttp", "security": "tls", "server_name": "example.com", "path": path,
+	}, nil)
+	for _, ip := range []string{"192.0.0.9", "192.88.99.1"} {
+		f.request("POST", "/api/pools/"+f.pool+"/targets", map[string]any{"name": ip, "ip": ip}, nil)
+	}
+	f.agent.Probe = func(_ context.Context, job agent.Job) agent.Result {
+		if job.Profile.Path != path {
+			t.Error("Unicode profile path changed over the wire")
+		}
+		if _, err := agent.XrayConfig(job, 18080); err != nil {
+			t.Errorf("backend accepted a profile/address rejected by the agent: %v", err)
+		}
+		return agent.Result{JobID: job.JobID, OK: true}
+	}
+	f.cycle()
+	for _, target := range f.targets() {
+		if target.Successes != 1 || target.Failures != 0 || !target.DNS || target.Status != "healthy" {
+			t.Errorf("compatible profile/address was not checked: %+v", target)
+		}
+	}
+}
