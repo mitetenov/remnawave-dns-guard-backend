@@ -168,6 +168,16 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 		return nil
 	}
 	action, operation := str(t["dns_action"]), t["dns_operation_id"]
+	// Old pending deletions do not carry an explicit choice to remove DNS.
+	// Only the new delete_dns intent may perform a provider mutation.
+	if action == "delete" {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if current := s.one("SELECT * FROM targets WHERE id=?", targetID); current != nil && current["dns_operation_id"] == operation {
+			s.forgetTarget(current)
+		}
+		return nil
+	}
 	present := oneOf(action, "enroll", "enable", "auto_restore")
 	provider, e := r.provider()
 	actual := false
@@ -226,7 +236,7 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 			return
 		}
 		s.exec("UPDATE pools SET dns_next_check=0 WHERE id=?", p["id"])
-		if action == "delete" {
+		if action == "delete_dns" {
 			s.exec("DELETE FROM targets WHERE id=?", targetID)
 			s.event("warning", "manual", "Target removed; exact A record absence verified", p["id"], targetID)
 			return

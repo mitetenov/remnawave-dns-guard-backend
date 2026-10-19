@@ -21,6 +21,24 @@ func (a *App) managementRoutes() {
 			return row{"ok": true}
 		})
 	})
+	a.route("DELETE /api/targets/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		deleteDNS := false
+		if values, present := r.URL.Query()["delete_dns"]; present {
+			if len(values) != 1 || !oneOf(values[0], "true", "false") {
+				invalid("delete_dns")
+			}
+			deleteDNS = values[0] == "true"
+		}
+		if deleteDNS {
+			return a.manualDNS(r.PathValue("id"), "delete_dns")
+		}
+		a.reconciler.dnsMu.Lock()
+		defer a.reconciler.dnsMu.Unlock()
+		return a.withStore(func() any {
+			a.s.forgetTarget(a.target(r.PathValue("id")))
+			return row{"ok": true}
+		})
+	})
 	a.route("PATCH /api/targets/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		var data TargetInput
 		fields := bodyObject(w, r, &data, nil, "name", "ip")
@@ -101,5 +119,14 @@ func (a *App) managementRoutes() {
 		}
 		mustErr(a.reconciler.executeLocked(id, true))
 		return a.withStore(func() any { return a.targetView(a.target(id)) })
+	})
+}
+
+// Caller holds the store mutex and the reconciler DNS mutex. Removing a target
+// also removes its jobs and pending DNS intent without contacting Cloudflare.
+func (s *Store) forgetTarget(target row) {
+	s.transaction(func() {
+		s.exec("DELETE FROM targets WHERE id=?", target["id"])
+		s.event("warning", "manual", fmt.Sprintf("Target removed: %s (%s); Cloudflare DNS records retained", target["name"], target["ip"]), target["pool_id"], target["id"])
 	})
 }

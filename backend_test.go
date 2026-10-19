@@ -276,7 +276,7 @@ func TestFinalActualRecordDuplicateAndUnrelated(t *testing.T) {
 	}
 	id := str(ts[0]["id"])
 	e.do("POST", "/api/targets/"+id+"/disable", nil, 409)
-	e.do("DELETE", "/api/targets/"+id, nil, 409)
+	e.do("DELETE", "/api/targets/"+id+"?delete_dns=true", nil, 409)
 	e.fake.add("8.8.4.4", "vpn.example.com", "A", false)
 	_, err := e.app.reconciler.scanPool(str(p["id"]), false)
 	if err != nil {
@@ -391,7 +391,7 @@ func TestManualCommitTimeoutSurvivesRestart(t *testing.T) {
 			} else if action == "enable" {
 				failure = "post"
 			} else if action == "delete" {
-				path = "/api/targets/" + id
+				path = "/api/targets/" + id + "?delete_dns=true"
 				method = "DELETE"
 			}
 			e.fake.setFail(failure)
@@ -403,7 +403,11 @@ func TestManualCommitTimeoutSurvivesRestart(t *testing.T) {
 				id = str(e.one("SELECT id FROM targets WHERE ip='9.9.9.9'")["id"])
 			}
 			pending := e.one("SELECT * FROM targets WHERE id=?", id)
-			if pending["dns_action"] != action || !truth(pending["dns_uncertain"]) {
+			expectedAction := action
+			if action == "delete" {
+				expectedAction = "delete_dns"
+			}
+			if pending["dns_action"] != expectedAction || !truth(pending["dns_uncertain"]) {
 				t.Fatal(pending)
 			}
 			if oneOf(action, "disable", "delete") && truth(pending["manual_enabled"]) {

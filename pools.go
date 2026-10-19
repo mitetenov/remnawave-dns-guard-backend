@@ -155,7 +155,6 @@ func (a *App) poolRoutes() {
 	})
 	a.route("POST /api/targets/{id}/disable", "ui", func(w http.ResponseWriter, r *http.Request) any { return a.manualDNS(r.PathValue("id"), "disable") })
 	a.route("POST /api/targets/{id}/enable", "ui", func(w http.ResponseWriter, r *http.Request) any { return a.manualDNS(r.PathValue("id"), "enable") })
-	a.route("DELETE /api/targets/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any { return a.manualDNS(r.PathValue("id"), "delete") })
 	a.route("POST /api/pools/{id}/sync", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		id := r.PathValue("id")
 		a.withStore(func() any { a.pool(id); return nil })
