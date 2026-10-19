@@ -342,7 +342,7 @@ func (a *App) manualDNSLocked(id, action string) any {
 	}()
 	mustErr(a.reconciler.executeLocked(id, true))
 	return a.withStore(func() any {
-		if action == "delete" {
+		if action == "delete_dns" {
 			return row{"ok": true}
 		}
 		return a.targetView(a.target(id))

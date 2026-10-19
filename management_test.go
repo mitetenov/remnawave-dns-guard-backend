@@ -137,6 +137,8 @@ func TestReplaceIPRetriesAfterUncertainProviderResponseAndRestart(t *testing.T) 
 				path := "/api/targets/" + id
 				if method == "POST" {
 					path += "/enable"
+				} else {
+					path += "?delete_dns=true"
 				}
 				e.do(method, path, nil, 409)
 			}
