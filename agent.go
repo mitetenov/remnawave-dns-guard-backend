@@ -10,8 +10,8 @@ import (
 var inconclusiveErrors = map[string]bool{"xray_start_failed": true, "xray_config_invalid": true, "invalid_job": true, "control_unhealthy": true, "control_unreachable": true, "proxy_unavailable": true}
 var knownErrors = map[string]bool{"probe_failed": true, "probe_timeout": true, "xray_start_failed": true, "xray_config_invalid": true, "control_unhealthy": true, "invalid_job": true, "proxy_unavailable": true, "http_error": true, "tls_error": true, "connection_failed": true, "timeout": true, "target_unreachable": true, "tunnel_unreachable": true}
 
-// Older agents use a strict profile decoder and cannot consume xhttp_extra.
-func supportsXHTTPExtra(version string) bool {
+// Older agents use a strict profile decoder and cannot consume new fields.
+func agentVersionAtLeast(version string, minor int) bool {
 	parts := strings.Split(version, ".")
 	if len(parts) != 3 {
 		return false
@@ -24,8 +24,11 @@ func supportsXHTTPExtra(version string) bool {
 		}
 		numbers[i] = n
 	}
-	return numbers[0] > 1 || numbers[0] == 1 && numbers[1] >= 1
+	return numbers[0] > 1 || numbers[0] == 1 && numbers[1] >= minor
 }
+
+func supportsXHTTPExtra(version string) bool { return agentVersionAtLeast(version, 1) }
+func supportsALPN(version string) bool       { return agentVersionAtLeast(version, 2) }
 
 func (a *App) agentRoutes() {
 	a.route("POST /api/agent/poll", "agent", func(w http.ResponseWriter, r *http.Request) any {
@@ -74,7 +77,7 @@ func (a *App) agentRoutes() {
 					}
 					p := a.pool(str(t["pool_id"]))
 					profile := s.profile(p)
-					if len(profile.XHTTPExtra) > 0 && !supportsXHTTPExtra(data.Version) {
+					if len(profile.XHTTPExtra) > 0 && !supportsXHTTPExtra(data.Version) || len(profile.ALPN) > 0 && !supportsALPN(data.Version) {
 						continue
 					}
 					jid := uid()

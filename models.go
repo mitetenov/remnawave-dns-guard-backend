@@ -55,6 +55,7 @@ type Profile struct {
 	Host        string          `json:"host"`
 	XHTTPMode   string          `json:"xhttp_mode"`
 	XHTTPExtra  json.RawMessage `json:"xhttp_extra,omitempty"`
+	ALPN        []string        `json:"alpn,omitempty"`
 }
 
 func defaultProfile() Profile { return Profile{Fingerprint: "chrome", Path: "/", XHTTPMode: "auto"} }
@@ -146,6 +147,9 @@ func canonicalUUID(s string) (string, bool) {
 	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:], true
 }
 func validateProfile(p *Profile) {
+	if !validALPN(p.ALPN, p.Security) {
+		invalid("alpn")
+	}
 	if !validXHTTPExtra(p.XHTTPExtra, p.Transport, p.XHTTPMode) {
 		invalid("xhttp_extra")
 	}
