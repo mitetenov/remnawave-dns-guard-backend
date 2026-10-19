@@ -203,6 +203,37 @@ func TestEightTargetsInTwoGoAgentCycles(t *testing.T) {
 		t.Fatalf("result batches=%d", f.results)
 	}
 }
+
+func TestXHTTPExtraReachesRealGoAgentConfig(t *testing.T) {
+	f := setup(t, 1, false)
+	extra := map[string]any{"xPaddingBytes": "100-1000", "headers": map[string]any{"X-Token": "a+b%20c"}, "xmux": map[string]any{"maxConcurrency": "16-32"}, "scMaxEachPostBytes": 1000000}
+	f.request("PUT", "/api/pools/"+f.pool+"/profile", map[string]any{"port": 443, "uuid": "550e8400-e29b-41d4-a716-446655440000", "transport": "xhttp", "security": "tls", "server_name": "example.com", "path": "/probe", "xhttp_extra": extra}, nil)
+	var seen int
+	f.agent.Probe = func(_ context.Context, job agent.Job) agent.Result {
+		config, err := agent.XrayConfig(job, 12345)
+		if err != nil {
+			t.Error(err)
+			return agent.Result{JobID: job.JobID, OK: false}
+		}
+		data, _ := json.Marshal(config)
+		var decoded map[string]any
+		_ = json.Unmarshal(data, &decoded)
+		out := decoded["outbounds"].([]any)[0].(map[string]any)
+		dest := out["settings"].(map[string]any)["vnext"].([]any)[0].(map[string]any)
+		settings := out["streamSettings"].(map[string]any)["xhttpSettings"].(map[string]any)
+		want, _ := json.Marshal(extra)
+		got, _ := json.Marshal(settings["extra"])
+		if !bytes.Equal(want, got) || dest["address"] != job.IP || settings["path"] != "/probe" {
+			t.Error("profile JSON changed on the wire")
+		}
+		seen++
+		return agent.Result{JobID: job.JobID, OK: true}
+	}
+	f.cycle()
+	if seen != 1 || f.targets()[0].Successes != 1 {
+		t.Fatal("extra profile not consumed")
+	}
+}
 func TestControlLossSuppressesGoAgentResults(t *testing.T) {
 	f := setup(t, 2, true)
 	checks := 0
