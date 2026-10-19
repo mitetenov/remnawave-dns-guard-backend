@@ -9,9 +9,7 @@ x-logging: &logging
 services:
   backend:
     image: mitetenov/remnawave-dns-guard-backend:latest
-    platform: linux/amd64
     restart: unless-stopped
-    init: true
     env_file:
       - .env
     volumes:
@@ -35,9 +33,7 @@ services:
 
   frontend:
     image: mitetenov/remnawave-dns-guard-frontend:latest
-    platform: linux/amd64
     restart: unless-stopped
-    init: true
     depends_on:
       backend:
         condition: service_healthy
