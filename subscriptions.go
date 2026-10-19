@@ -2,7 +2,10 @@ package guard
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net"
@@ -87,6 +90,18 @@ func subscriptionRedirect(req *http.Request, via []*http.Request) error {
 	return err
 }
 
+func setSubscriptionDevice(req *http.Request, secret string) {
+	port := req.URL.Port()
+	if port == "" {
+		port = "443"
+	}
+	origin := net.JoinHostPort(strings.ToLower(req.URL.Hostname()), port)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("DNSGuard/subscription-device/v1\x00" + origin))
+	req.Header.Set("X-Hwid", hex.EncodeToString(mac.Sum(nil)))
+	req.Header.Set("X-Device-Model", "DNS Guard")
+}
+
 func subscriptionURIs(body []byte) ([]string, error) {
 	text := strings.TrimSpace(strings.TrimPrefix(string(body), "\ufeff"))
 	// Plain URI lists and standard/URL-safe Base64, with or without padding.
@@ -114,10 +129,19 @@ func subscriptionURIs(body []byte) ([]string, error) {
 	if len(list) == 0 {
 		return nil, errors.New("В подписке нет VLESS-ссылок. Нужен список ссылок в текстовом формате или Base64.")
 	}
+	placeholders := 0
+	for _, uri := range list {
+		if u, err := url.Parse(uri); err == nil && u.Hostname() == "0.0.0.0" && u.Port() == "1" {
+			placeholders++
+		}
+	}
+	if placeholders == len(list) {
+		return nil, errors.New("Сервер подписки вернул служебную заглушку вместо серверов. Проверьте статус подписки и ограничения устройств в Remnawave.")
+	}
 	return list, nil
 }
 
-func fetchSubscription(ctx context.Context, client *http.Client, value string) ([]string, error) {
+func fetchSubscription(ctx context.Context, client *http.Client, value, deviceSecret string) ([]string, error) {
 	u, err := subscriptionURL(value)
 	if err != nil {
 		return nil, err
@@ -128,13 +152,40 @@ func fetchSubscription(ctx context.Context, client *http.Client, value string) (
 	}
 	req.Header.Set("User-Agent", "DNSGuard/1.0")
 	req.Header.Set("Accept", "text/plain")
-	resp, err := client.Do(req)
+	requestClient := *client
+	if deviceSecret != "" {
+		setSubscriptionDevice(req, deviceSecret)
+		requestClient.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+			if err := subscriptionRedirect(next, via); err != nil {
+				return err
+			}
+			if client.CheckRedirect != nil {
+				if err := client.CheckRedirect(next, via); err != nil {
+					return err
+				}
+			}
+			// Use a different identifier for each provider, including redirects.
+			setSubscriptionDevice(next, deviceSecret)
+			return nil
+		}
+	}
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		return nil, errors.New("Не удалось загрузить подписку. Проверьте ссылку и доступность публичного HTTPS-сервера.")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, errors.New("Сервер подписки отклонил запрос. Проверьте ссылку, срок действия и ограничения подписки.")
+	}
+	flag := func(name string) bool { return strings.EqualFold(strings.TrimSpace(resp.Header.Get(name)), "true") }
+	if flag("X-Hwid-Max-Devices-Reached") || flag("X-Hwid-Limit") && !flag("X-Hwid-Not-Supported") {
+		return nil, errors.New("Достигнут лимит устройств подписки. Освободите один слот в Remnawave или используйте отдельную подписку для проверки.")
+	}
+	if flag("X-Hwid-Not-Supported") {
+		if deviceSecret != "" {
+			return nil, errors.New("Сервер подписки не принял HWID DNS Guard. Проверьте требования к устройствам в Remnawave или вставьте VLESS-ссылку напрямую.")
+		}
+		return nil, errors.New("Подписка требует HWID. Отметьте «Использовать DNS Guard как отдельное устройство» и повторите загрузку. Это может занять один слот подписки.")
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBytes+1))
 	if err != nil {
@@ -150,10 +201,15 @@ func (a *App) subscriptionRoutes() {
 	a.route("POST /api/subscriptions/preview", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		w.Header().Set("Cache-Control", "no-store")
 		var data struct {
-			URL string `json:"url"`
+			URL     string `json:"url"`
+			UseHWID bool   `json:"use_hwid"`
 		}
 		bodyObject(w, r, &data, []string{"url"})
-		uris, err := fetchSubscription(r.Context(), a.subscriptionClient, data.URL)
+		deviceSecret := ""
+		if data.UseHWID {
+			deviceSecret = a.config.AppSecret
+		}
+		uris, err := fetchSubscription(r.Context(), a.subscriptionClient, data.URL, deviceSecret)
 		if err != nil {
 			fail(422, err.Error())
 		}
