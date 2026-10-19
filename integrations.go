@@ -217,6 +217,36 @@ func (c *Cloudflare) ensure(p row, ip string, present bool) (bool, error) {
 	return exists, nil
 }
 
+// Confirm the replacement before removing the old IP, including when it is the
+// pool's final A record. Repeating either step after a timeout is idempotent.
+func (c *Cloudflare) replaceIP(p row, oldIP, newIP string, present bool) (bool, error) {
+	if present {
+		if _, err := c.ensure(p, newIP, true); err != nil {
+			return false, err
+		}
+	}
+	if _, err := c.ensure(p, oldIP, false); err != nil {
+		return false, err
+	}
+	records, err := c.addressRecords(p)
+	if err != nil {
+		return false, err
+	}
+	if err = checkProxy(records); err != nil {
+		return false, err
+	}
+	actual := false
+	for _, record := range records {
+		if record["type"] == "A" && record["content"] == newIP {
+			actual = true
+		}
+	}
+	if actual != present {
+		return false, integration("Cloudflare DNS replacement could not be verified; retry later")
+	}
+	return actual, nil
+}
+
 type Remnawave struct {
 	url, token string
 	client     *http.Client
