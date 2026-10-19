@@ -8,7 +8,7 @@
 Репозиторий содержит Go/SQLite, API-контракт, тесты и Compose панели.
 [Фронтенд](https://github.com/mitetenov/remnawave-dns-guard-frontend) и
 [RU-агент](https://github.com/mitetenov/remnawave-dns-guard-agent) находятся в отдельных репозиториях.
-Для запуска используются готовые образы Docker Hub; клонировать UI на сервер не требуется.
+Для запуска используются готовые образы Docker Hub. На сервере достаточно `docker-compose.yaml` и `.env`; клонировать репозитории и устанавливать Go/Node.js не требуется.
 
 ## Что потребуется
 
@@ -29,19 +29,23 @@ DNS-кеши учитывают TTL, поэтому удаление запис�
 
 ## Запуск панели
 
-В каталоге исходников:
+Для новой установки в отдельном каталоге скачайте только Compose и пример настроек:
 
 ```sh
-cp .env.example .env
+umask 077
+mkdir -p /opt/remnawave-dns-guard
+cd /opt/remnawave-dns-guard
+curl -fsSLo docker-compose.yaml https://raw.githubusercontent.com/mitetenov/remnawave-dns-guard-backend/main/docker-compose.yaml
+curl -fsSLo .env https://raw.githubusercontent.com/mitetenov/remnawave-dns-guard-backend/main/.env.example
 chmod 600 .env
 openssl rand -hex 32
 openssl rand -hex 32
 openssl rand -hex 24
 ```
 
-Запишите **разные** результаты первых двух команд в `APP_SECRET` и `AGENT_TOKEN`, третий можно использовать как `ADMIN_PASSWORD`. Заполните `ADMIN_USERNAME`. Не вставляйте эти значения в переписку, git или URL. Значения секретов должны содержать минимум 32 символа; пустые обязательные переменные останавливают Compose. Пример не содержит рабочих учётных данных.
+Запишите **разные** результаты первых двух команд генерации в `APP_SECRET` и `AGENT_TOKEN`, третий можно использовать как `ADMIN_PASSWORD`. Заполните `ADMIN_USERNAME`. Не вставляйте эти значения в переписку, git или URL. Значения секретов должны содержать минимум 32 символа; backend проверяет обязательные настройки при запуске. Пример не содержит рабочих учётных данных. Для существующей установки сохраняйте прежний `.env`, не скачивая его поверх настроек.
 
-Установите `PUBLIC_ORIGIN=https://guard.example.com`: точный origin браузера без завершающего `/` и без пути. Для HTTPS оставьте `COOKIE_SECURE=true`. Параметры задаются на сервере, фронтенду отдельный API URL не нужен.
+Установите `PUBLIC_ORIGIN=https://guard.example.com`: точный origin браузера без завершающего `/` и без пути. Для HTTPS оставьте `COOKIE_SECURE=true`. Backend получает настройки из `.env` через `env_file`; значения приложения не перечисляются в Compose. Путь файла считается относительно `docker-compose.yaml`. Оставьте `DATABASE_PATH=/data/guard.db`, чтобы база находилась в подключённом томе. Параметры образов и host-порта Compose также читает из `.env`; фронтенду отдельный API URL не нужен.
 
 ```sh
 docker compose config --quiet

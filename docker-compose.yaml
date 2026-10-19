@@ -12,17 +12,8 @@ services:
     platform: linux/amd64
     restart: unless-stopped
     init: true
-    environment:
-      ADMIN_USERNAME: ${ADMIN_USERNAME:?Set ADMIN_USERNAME in .env}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
-      APP_SECRET: ${APP_SECRET:?Set APP_SECRET (at least 32 characters) in .env}
-      AGENT_TOKEN: ${AGENT_TOKEN:?Set AGENT_TOKEN (at least 32 characters) in .env}
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN to the exact public origin}
-      COOKIE_SECURE: ${COOKIE_SECURE:-true}
-      DATABASE_PATH: /data/guard.db
-      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
-      REMNAWAVE_URL: ${REMNAWAVE_URL:-}
-      REMNAWAVE_API_TOKEN: ${REMNAWAVE_API_TOKEN:-}
+    env_file:
+      - .env
     volumes:
       - guard-data:/data
     expose:
