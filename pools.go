@@ -166,7 +166,13 @@ func (a *App) poolRoutes() {
 	a.route("POST /api/pools/{id}/check", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
 			id := r.PathValue("id")
-			a.pool(id)
+			p := a.pool(id)
+			if p["profile"] == nil {
+				fail(409, "Сначала сохраните VLESS-профиль для проверки узлов")
+			}
+			if a.s.one("SELECT id FROM targets WHERE pool_id=? AND manual_enabled=1", id) == nil {
+				fail(409, "Добавьте или включите хотя бы один узел для проверки")
+			}
 			a.s.exec("UPDATE targets SET next_due=0 WHERE pool_id=? AND manual_enabled=1", id)
 			return row{"ok": true}
 		})

@@ -212,6 +212,7 @@ class ContractTests(unittest.TestCase):
         self.error(s, 'POST', '/api/pools', {
             'name': 'Duplicate', 'hostname': pool['hostname'], 'zone_id': 'zone'}, 409)
         self.error(s, 'PATCH', path, {'automation_enabled': True}, 409)
+        self.error(s, 'POST', path + '/check', None, 409)
         self.error(s, 'PATCH', path, {'name': None}, 422)
         self.error(s, 'PATCH', path, {'not_a_field': 'do-not-echo-me'}, 422)
         detail = self.error(s, 'PUT', path + '/profile', {
@@ -223,7 +224,7 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn(PROFILE['uuid'], json.dumps(pools))
         self.assertEqual(s.request('PATCH', path, {'name': 'Обновлённый'})[1]['name'], 'Обновлённый')
         self.assertEqual(s.request('GET', path + '/targets')[:2], (200, []))
-        self.assertEqual(s.request('POST', path + '/check')[:2], (200, {'ok': True}))
+        self.error(s, 'POST', path + '/check', None, 409)
         for method, endpoint in (('GET', '/api/cloudflare/zones'), ('GET', '/api/remnawave/nodes'),
                                  ('GET', '/api/remnawave/hosts'),
                                  ('POST', '/api/integrations/cloudflare/test'),
