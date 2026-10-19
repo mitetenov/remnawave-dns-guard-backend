@@ -2,6 +2,7 @@ package guard
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -41,18 +42,19 @@ type TargetInput struct {
 	RemnawaveUUID *string `json:"remnawave_uuid"`
 }
 type Profile struct {
-	Port        int    `json:"port"`
-	UUID        string `json:"uuid"`
-	Transport   string `json:"transport"`
-	Security    string `json:"security"`
-	ServerName  string `json:"server_name"`
-	PublicKey   string `json:"public_key"`
-	ShortID     string `json:"short_id"`
-	Flow        string `json:"flow"`
-	Fingerprint string `json:"fingerprint"`
-	Path        string `json:"path"`
-	Host        string `json:"host"`
-	XHTTPMode   string `json:"xhttp_mode"`
+	Port        int             `json:"port"`
+	UUID        string          `json:"uuid"`
+	Transport   string          `json:"transport"`
+	Security    string          `json:"security"`
+	ServerName  string          `json:"server_name"`
+	PublicKey   string          `json:"public_key"`
+	ShortID     string          `json:"short_id"`
+	Flow        string          `json:"flow"`
+	Fingerprint string          `json:"fingerprint"`
+	Path        string          `json:"path"`
+	Host        string          `json:"host"`
+	XHTTPMode   string          `json:"xhttp_mode"`
+	XHTTPExtra  json.RawMessage `json:"xhttp_extra,omitempty"`
 }
 
 func defaultProfile() Profile { return Profile{Fingerprint: "chrome", Path: "/", XHTTPMode: "auto"} }
@@ -144,6 +146,9 @@ func canonicalUUID(s string) (string, bool) {
 	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:], true
 }
 func validateProfile(p *Profile) {
+	if !validXHTTPExtra(p.XHTTPExtra, p.Transport, p.XHTTPMode) {
+		invalid("xhttp_extra")
+	}
 	if p.Port < 1 || p.Port > 65535 {
 		invalid("port")
 	}

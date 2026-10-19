@@ -3,11 +3,29 @@ package guard
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
 var inconclusiveErrors = map[string]bool{"xray_start_failed": true, "xray_config_invalid": true, "invalid_job": true, "control_unhealthy": true, "control_unreachable": true, "proxy_unavailable": true}
 var knownErrors = map[string]bool{"probe_failed": true, "probe_timeout": true, "xray_start_failed": true, "xray_config_invalid": true, "control_unhealthy": true, "invalid_job": true, "proxy_unavailable": true, "http_error": true, "tls_error": true, "connection_failed": true, "timeout": true, "target_unreachable": true, "tunnel_unreachable": true}
+
+// Older agents use a strict profile decoder and cannot consume xhttp_extra.
+func supportsXHTTPExtra(version string) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	numbers := [3]int{}
+	for i, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 || strconv.Itoa(n) != part {
+			return false
+		}
+		numbers[i] = n
+	}
+	return numbers[0] > 1 || numbers[0] == 1 && numbers[1] >= 1
+}
 
 func (a *App) agentRoutes() {
 	a.route("POST /api/agent/poll", "agent", func(w http.ResponseWriter, r *http.Request) any {
@@ -50,12 +68,19 @@ func (a *App) agentRoutes() {
 					s.exec("UPDATE jobs SET consumed=1 WHERE agent_id=? AND consumed=0", data.AgentID)
 					return
 				}
-				for _, t := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id WHERE manual_enabled=1 AND profile IS NOT NULL AND next_due<=? AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND consumed=0) ORDER BY next_due,targets.id LIMIT 4", now) {
+				for _, t := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id WHERE manual_enabled=1 AND profile IS NOT NULL AND next_due<=? AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND consumed=0) ORDER BY next_due,targets.id", now) {
+					if len(jobs) == 4 {
+						break
+					}
 					p := a.pool(str(t["pool_id"]))
+					profile := s.profile(p)
+					if len(profile.XHTTPExtra) > 0 && !supportsXHTTPExtra(data.Version) {
+						continue
+					}
 					jid := uid()
 					s.exec("INSERT INTO jobs (id,target_id,agent_id,revision,issued,expires) VALUES (?,?,?,?,?,?)", jid, t["id"], data.AgentID, p["revision"], now, now+leaseSeconds)
 					s.exec("UPDATE targets SET next_due=? WHERE id=?", now+num(p["interval_seconds"]), t["id"])
-					jobs = append(jobs, row{"job_id": jid, "target_id": t["id"], "ip": t["ip"], "profile": s.profile(p), "timeout_seconds": 15})
+					jobs = append(jobs, row{"job_id": jid, "target_id": t["id"], "ip": t["ip"], "profile": profile, "timeout_seconds": 15})
 				}
 			})
 			return row{"jobs": jobs, "poll_after_seconds": 10}
