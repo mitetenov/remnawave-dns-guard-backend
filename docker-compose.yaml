@@ -8,7 +8,7 @@ x-logging: &logging
 
 services:
   backend:
-    image: ${BACKEND_IMAGE:-mitetenov/remnawave-dns-guard-backend:latest}
+    image: mitetenov/remnawave-dns-guard-backend:latest
     platform: linux/amd64
     restart: unless-stopped
     init: true
@@ -34,7 +34,7 @@ services:
     logging: *logging
 
   frontend:
-    image: ${FRONTEND_IMAGE:-mitetenov/remnawave-dns-guard-frontend:latest}
+    image: mitetenov/remnawave-dns-guard-frontend:latest
     platform: linux/amd64
     restart: unless-stopped
     init: true

@@ -45,7 +45,7 @@ openssl rand -hex 24
 
 Запишите **разные** результаты первых двух команд генерации в `APP_SECRET` и `AGENT_TOKEN`, третий можно использовать как `ADMIN_PASSWORD`. Заполните `ADMIN_USERNAME`. Не вставляйте эти значения в переписку, git или URL. Значения секретов должны содержать минимум 32 символа; backend проверяет обязательные настройки при запуске. Пример не содержит рабочих учётных данных. Для существующей установки сохраняйте прежний `.env`, не скачивая его поверх настроек.
 
-Установите `PUBLIC_ORIGIN=https://guard.example.com`: точный origin браузера без завершающего `/` и без пути. Для HTTPS оставьте `COOKIE_SECURE=true`. Backend получает настройки из `.env` через `env_file`; значения приложения не перечисляются в Compose. Путь файла считается относительно `docker-compose.yaml`. Оставьте `DATABASE_PATH=/data/guard.db`, чтобы база находилась в подключённом томе. Параметры образов и host-порта Compose также читает из `.env`; фронтенду отдельный API URL не нужен.
+Установите `PUBLIC_ORIGIN=https://guard.example.com`: точный origin браузера без завершающего `/` и без пути. Для HTTPS оставьте `COOKIE_SECURE=true`. Backend получает настройки из `.env` через `env_file`; значения приложения не перечисляются в Compose. Путь файла считается относительно `docker-compose.yaml`. Оставьте `DATABASE_PATH=/data/guard.db`, чтобы база находилась в подключённом томе, и `LISTEN_ADDR=:8000` для связи с nginx. Адрес и host-порт панели (`UI_BIND_ADDRESS`, `UI_PORT`) Compose также читает из `.env`; фронтенду отдельный API URL не нужен.
 
 ```sh
 docker compose config --quiet
@@ -186,5 +186,7 @@ Pull request не публикует образы; deploy автоматичес
 
 Repository variables: `DOCKERHUB_USERNAME`, `DOCKERHUB_IMAGE`.
 Repository secret: `DOCKERHUB_TOKEN` с правами Read & Write.
-Compose разрешает закрепить `BACKEND_IMAGE` и `FRONTEND_IMAGE` в `.env`
-для обновления или отката. Теги бэкенда и UI относятся к независимым commit SHA.
+В `docker-compose.yaml` указаны готовые образы backend и frontend с тегом `latest`.
+Для обновления выполните `docker compose pull` и `docker compose up -d`.
+Для отката замените тег непосредственно в нужном `image:` на `sha-<полный commit SHA>`.
+Теги бэкенда и UI относятся к независимым commit SHA.
