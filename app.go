@@ -46,6 +46,7 @@ type App struct {
 	config             Config
 	s                  *Store
 	reconciler         *Reconciler
+	notifier           *Notifier
 	client             *http.Client
 	subscriptionClient *http.Client
 	mux                *http.ServeMux
@@ -65,9 +66,11 @@ func New(c Config, options Options) (*App, error) {
 	a := &App{config: c, s: s, client: providerClient(options.Client), mux: http.NewServeMux(), loginFailures: []float64{}}
 	a.subscriptionClient = newSubscriptionClient()
 	a.reconciler = newReconciler(s, a.dnsProvider)
+	a.notifier = newNotifier(s, a.client)
 	a.routes()
 	if options.BackgroundTasks {
 		a.reconciler.start()
+		a.notifier.start()
 	}
 	return a, nil
 }
@@ -96,6 +99,7 @@ func (a *App) Handler() http.Handler {
 }
 func (a *App) Close() error {
 	a.closeOnce.Do(func() {
+		a.notifier.close()
 		a.reconciler.close()
 		a.client.CloseIdleConnections()
 		a.subscriptionClient.CloseIdleConnections()
@@ -103,7 +107,7 @@ func (a *App) Close() error {
 	})
 	return a.closeErr
 }
-func (a *App) RunOnce() { a.reconciler.runOnce() }
+func (a *App) RunOnce() { a.reconciler.runOnce(); a.notifier.runOnce() }
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -355,6 +359,7 @@ func (a *App) manualDNS(id, action string) any {
 }
 
 func (a *App) routes() {
+	a.notificationRoutes()
 	a.route("GET /api/health", "", func(w http.ResponseWriter, r *http.Request) any { return row{"ok": true} })
 	a.route("POST /api/auth/login", "origin", func(w http.ResponseWriter, r *http.Request) any {
 		data := Login{}
