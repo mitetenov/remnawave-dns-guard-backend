@@ -218,6 +218,7 @@ func (s *Store) initialize(c Config) (err error) {
 			s.set(key, value)
 		}
 	}
+	s.initializeNotifications()
 	return nil
 }
 func safeDBError(p any) error { return fmt.Errorf("cannot open or migrate SQLite database") }
