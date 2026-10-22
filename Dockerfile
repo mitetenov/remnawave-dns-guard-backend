@@ -1,6 +1,7 @@
-# syntax=docker/dockerfile:1
-FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine AS build
+# syntax=docker/dockerfile:1.28.0
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS build
 ARG TARGETARCH
+ENV GOTOOLCHAIN=local
 WORKDIR /src
 RUN test "$TARGETARCH" = amd64 || (echo 'Only linux/amd64 images are supported' >&2; exit 1)
 COPY go.mod go.sum ./
