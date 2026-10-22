@@ -12,11 +12,7 @@ func (a *App) poolRoutes() {
 	a.managementRoutes()
 	a.route("GET /api/pools", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
-			out := []row{}
-			for _, p := range a.s.all("SELECT * FROM pools ORDER BY created_at") {
-				out = append(out, poolView(p))
-			}
-			return out
+			return a.poolList()
 		})
 	})
 	a.route("POST /api/pools", "ui", func(w http.ResponseWriter, r *http.Request) any {
