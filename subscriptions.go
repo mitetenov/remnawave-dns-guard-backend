@@ -21,10 +21,10 @@ const maxSubscriptionBytes = 2 << 20
 func subscriptionURL(value string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(value))
 	if err != nil || len(value) > 8192 || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
-		return nil, errors.New("Укажите HTTPS-ссылку на подписку без логина, пароля и фрагмента.")
+		return nil, errors.New("Укажите HTTPS-ссылку на подписку без логина, пароля и фрагмента.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	if ip, err := netip.ParseAddr(u.Hostname()); err == nil && !publicSubscriptionIP(ip) {
-		return nil, errors.New("Ссылка подписки должна вести на публичный сервер.")
+		return nil, errors.New("Ссылка подписки должна вести на публичный сервер.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	return u, nil
 }
@@ -121,13 +121,13 @@ func subscriptionURIs(body []byte) ([]string, error) {
 			continue
 		}
 		if len(uri) > 16384 || len(list) >= 500 {
-			return nil, errors.New("Подписка превышает лимит: до 500 серверов и 16 КБ на ссылку.")
+			return nil, errors.New("Подписка превышает лимит: до 500 серверов и 16 КБ на ссылку.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 		}
 		seen[uri] = true
 		list = append(list, uri)
 	}
 	if len(list) == 0 {
-		return nil, errors.New("В подписке нет VLESS-ссылок. Нужен список ссылок в текстовом формате или Base64.")
+		return nil, errors.New("В подписке нет VLESS-ссылок. Нужен список ссылок в текстовом формате или Base64.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	placeholders := 0
 	for _, uri := range list {
@@ -136,7 +136,7 @@ func subscriptionURIs(body []byte) ([]string, error) {
 		}
 	}
 	if placeholders == len(list) {
-		return nil, errors.New("Сервер подписки вернул служебную заглушку вместо серверов. Проверьте статус подписки и ограничения устройств в Remnawave.")
+		return nil, errors.New("Сервер подписки вернул служебную заглушку вместо серверов. Проверьте статус подписки и ограничения устройств в Remnawave.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	return list, nil
 }
@@ -148,7 +148,7 @@ func fetchSubscription(ctx context.Context, client *http.Client, value, deviceSe
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, errors.New("Не удалось прочитать ссылку подписки.")
+		return nil, errors.New("Не удалось прочитать ссылку подписки.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	req.Header.Set("User-Agent", "DNSGuard/1.0")
 	req.Header.Set("Accept", "text/plain")
@@ -171,28 +171,28 @@ func fetchSubscription(ctx context.Context, client *http.Client, value, deviceSe
 	}
 	resp, err := requestClient.Do(req)
 	if err != nil {
-		return nil, errors.New("Не удалось загрузить подписку. Проверьте ссылку и доступность публичного HTTPS-сервера.")
+		return nil, errors.New("Не удалось загрузить подписку. Проверьте ссылку и доступность публичного HTTPS-сервера.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("Сервер подписки отклонил запрос. Проверьте ссылку, срок действия и ограничения подписки.")
+		return nil, errors.New("Сервер подписки отклонил запрос. Проверьте ссылку, срок действия и ограничения подписки.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	flag := func(name string) bool { return strings.EqualFold(strings.TrimSpace(resp.Header.Get(name)), "true") }
 	if flag("X-Hwid-Max-Devices-Reached") || flag("X-Hwid-Limit") && !flag("X-Hwid-Not-Supported") {
-		return nil, errors.New("Достигнут лимит устройств подписки. Освободите один слот в Remnawave или используйте отдельную подписку для проверки.")
+		return nil, errors.New("Достигнут лимит устройств подписки. Освободите один слот в Remnawave или используйте отдельную подписку для проверки.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	if flag("X-Hwid-Not-Supported") {
 		if deviceSecret != "" {
-			return nil, errors.New("Сервер подписки не принял HWID DNS Guard. Проверьте требования к устройствам в Remnawave или вставьте VLESS-ссылку напрямую.")
+			return nil, errors.New("Сервер подписки не принял HWID DNS Guard. Проверьте требования к устройствам в Remnawave или вставьте VLESS-ссылку напрямую.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 		}
-		return nil, errors.New("Подписка требует HWID. Отметьте «Использовать DNS Guard как отдельное устройство» и повторите загрузку. Это может занять один слот подписки.")
+		return nil, errors.New("Подписка требует HWID. Отметьте «Использовать DNS Guard как отдельное устройство» и повторите загрузку. Это может занять один слот подписки.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBytes+1))
 	if err != nil {
-		return nil, errors.New("Не удалось прочитать ответ сервера подписки. Повторите загрузку.")
+		return nil, errors.New("Не удалось прочитать ответ сервера подписки. Повторите загрузку.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	if len(body) > maxSubscriptionBytes {
-		return nil, errors.New("Подписка слишком большая. Максимальный размер — 2 МБ.")
+		return nil, errors.New("Подписка слишком большая. Максимальный размер — 2 МБ.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	return subscriptionURIs(body)
 }

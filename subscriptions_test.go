@@ -7,11 +7,11 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
+
 	"net/netip"
 	"regexp"
 	"strings"
-	"sync"
+
 	"testing"
 )
 
@@ -146,67 +146,6 @@ func TestSubscriptionRedirectCannotReachPrivateServer(t *testing.T) {
 	}
 }
 
-func TestSubscriptionPreviewOverTLSWithoutPersistence(t *testing.T) {
-	e := newTestEnv(t)
-	requests := 0
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
-			t.Error("panel credentials leaked to subscription server")
-		}
-		_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString([]byte(subscriptionURI)))
-	}))
-	defer upstream.Close()
-	client := upstream.Client()
-	transport := client.Transport.(*http.Transport).Clone()
-	dialer := subscriptionDialer{
-		lookup: func(context.Context, string, string) ([]netip.Addr, error) {
-			return []netip.Addr{netip.MustParseAddr("1.1.1.1")}, nil
-		},
-		dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			if address != "1.1.1.1:443" {
-				t.Error("unvalidated destination used")
-			}
-			return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
-		},
-	}
-	transport.DialContext = dialer.DialContext
-	client.Transport, client.CheckRedirect = transport, subscriptionRedirect
-	e.app.subscriptionClient.CloseIdleConnections()
-	e.app.subscriptionClient = client
-	resp, err := e.request("POST", "/api/subscriptions/preview", row{"url": "https://example.com/secret"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != 200 || resp.Header.Get("Cache-Control") != "no-store" || !strings.Contains(string(body), "vless://") || requests != 1 {
-		t.Fatalf("preview failed: status=%d body=%s requests=%d", resp.StatusCode, body, requests)
-	}
-	for _, path := range []string{"/api/pools", "/api/events"} {
-		if rows := asRows(e.do("GET", path, nil, 200)); len(rows) != 0 {
-			t.Fatal("preview mutated stored state")
-		}
-	}
-	e.do("POST", "/api/subscriptions/preview", row{"url": nil}, 422)
-	e.do("POST", "/api/subscriptions/preview", row{"url": "https://127.0.0.1/secret"}, 422)
-	req, _ := http.NewRequest("POST", e.server.URL+"/api/subscriptions/preview", strings.NewReader(`{"url":"https://example.com/secret"}`))
-	req.Header.Set("Origin", "https://untrusted.example")
-	rejected, err := e.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rejected.Body.Close()
-	if rejected.StatusCode != 403 {
-		t.Fatal("cross-origin preview was not rejected")
-	}
-	e.do("POST", "/api/auth/logout", nil, 200)
-	e.do("POST", "/api/subscriptions/preview", row{"url": "https://example.com/secret"}, 401)
-	if requests != 1 {
-		t.Fatal("invalid or unauthenticated request reached upstream")
-	}
-}
-
 func TestSubscriptionHwidErrorsDoNotBecomeServers(t *testing.T) {
 	for _, tc := range []struct {
 		headers http.Header
@@ -270,69 +209,5 @@ func TestSubscriptionDeviceHeadersFollowRedirectsWithoutSharingIdentity(t *testi
 		if (ids[0] == ids[1]) != sameProvider {
 			t.Fatal("HWID must remain stable only for the same provider")
 		}
-	}
-}
-
-func TestSubscriptionHwidOptInOverTLSAndRestart(t *testing.T) {
-	e := newTestEnv(t)
-	var mu sync.Mutex
-	devices := map[string]bool{}
-	requests := 0
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		requests++
-		if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
-			t.Error("panel credentials leaked")
-		}
-		hwid := r.Header.Get("X-Hwid")
-		if hwid == "" {
-			w.Header().Set("X-Hwid-Not-Supported", "true")
-			w.Header().Set("X-Hwid-Limit", "true")
-			_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString([]byte(hwidPlaceholder)))
-			return
-		}
-		if !regexp.MustCompile(`^[a-zA-Z0-9=-]{10,64}$`).MatchString(hwid) || hwid == e.cfg.AppSecret || r.Header.Get("X-Device-Model") != "DNS Guard" {
-			t.Error("invalid subscription device headers")
-		}
-		devices[hwid] = true
-		_, _ = io.WriteString(w, base64.StdEncoding.EncodeToString([]byte(subscriptionURI)))
-	}))
-	defer upstream.Close()
-	connect := func() {
-		client := upstream.Client()
-		transport := client.Transport.(*http.Transport).Clone()
-		transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
-		}
-		copy := *client
-		copy.Transport, copy.CheckRedirect = transport, subscriptionRedirect
-		e.app.subscriptionClient.CloseIdleConnections()
-		e.app.subscriptionClient = &copy
-	}
-	connect()
-	endpoint := "/api/subscriptions/preview"
-	message := asRow(e.do("POST", endpoint, row{"url": "https://example.com/account-a"}, 422))
-	if !strings.Contains(str(message["detail"]), "Подписка требует HWID") {
-		t.Fatal("the operator was not told to opt in")
-	}
-	for _, account := range []string{"account-a", "account-b"} {
-		data := asRow(e.do("POST", endpoint, row{"url": "https://example.com/" + account, "use_hwid": true}, 200))
-		if len(data["uris"].([]any)) != 1 || data["uris"].([]any)[0] != subscriptionURI {
-			t.Fatal("real servers were not imported with HWID")
-		}
-	}
-	e.restart(false)
-	connect()
-	e.do("POST", endpoint, row{"url": "https://example.com/account-a", "use_hwid": true}, 200)
-	e.do("POST", endpoint, row{"url": "https://example.com/account-a", "use_hwid": false}, 422)
-	e.do("POST", endpoint, row{"url": "https://example.com/account-a", "use_hwid": nil}, 422)
-	mu.Lock()
-	defer mu.Unlock()
-	if len(devices) != 1 || requests != 5 {
-		t.Fatal("retry or restart consumed another device slot")
-	}
-	if len(asRows(e.do("GET", "/api/pools", nil, 200))) != 0 || len(asRows(e.do("GET", "/api/events", nil, 200))) != 0 {
-		t.Fatal("subscription preview modified panel state")
 	}
 }

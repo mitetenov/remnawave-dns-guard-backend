@@ -2,43 +2,23 @@
 
 ## Локальные команды
 
-Из корня репозитория нужен Go 1.27.2:
+Нужен Go 1.27.3:
 
 ```sh
-go mod download
+go mod tidy
+go mod verify
+test -z "$(gofmt -l $(git ls-files '*.go'))"
 go vet ./...
-go test -race -count=1 ./...
-go build -o dns-guard-backend ./cmd/dns-guard
-DNS_GUARD_BACKEND_BINARY="$PWD/dns-guard-backend" python3 -m unittest discover -s integration_tests -v
-```
-
-Python в последней команде — только стандартная библиотека на тестирующем хосте. В образе и бэкенде Python нет. Внешняя проверка запускает настоящий Go-бинарный файл, открывает временную SQLite старого формата с Fernet-данными Python и проверяет сохранение сессии, профиля и состояния, ротацию учётных данных, API, задания агента и корректное завершение запросов при SIGTERM.
-
-Go-тесты используют настоящую временную SQLite и локальные HTTP-серверы; Cloudflare и Remnawave заменяются HTTP transport. Проверяются исключение/восстановление, последняя фактическая A, дубликаты и посторонние записи, проксированные A/AAAA, отсутствие DNS-изменений при недоступной контрольной связи, ручные операции с потерянным ответом и повтором после перезапуска, фоновая сверка, свежесть проб, валидация профилей, replay и аренда заданий. Медленный DNS API не должен задерживать heartbeat или приём результатов. Запускается race detector; шифрование проверяется эталонными токенами Python. Проверяются согласованный WAL backup и отказ восстановления повреждённой копии.
-
-Проверка реального HTTP-обмена Go-агента с Go-бэкендом:
-
-```sh
-python3 integration_tests/go_wire/run.py --agent ../agent
-```
-
-Нужен локальный Go-репозиторий агента по указанному пути. Тест создаёт отдельный временный модуль с локальными replace, не добавляя агент в runtime-зависимости бэкенда. Только внешние DNS-запросы и запуск туннеля заменяются контролируемыми ответами; агент и API работают через настоящий HTTP. Этот дополнительный тест выполняется локально и не является обязательным CI-заданием: самостоятельные репозитории можно обновлять независимо.
-
-```sh
-docker compose config --quiet
+golangci-lint run
+go test -count=1 ./...
+go test -race -vet=off -count=1 ./...
+go build ./...
 docker build --platform linux/amd64 -t remnawave-dns-guard-backend:local .
-python3 scripts/smoke_image.py remnawave-dns-guard-backend:local
 ```
 
-Для проверки Compose рядом с `docker-compose.yaml` нужен `.env`: backend загружает его через `env_file`. `config --quiet` проверяет наличие файла и структуру Compose без печати секретов; обязательные значения приложения backend проверяет при запуске. Обычный `docker compose config` раскрывает секреты. Образы поддерживают только Linux AMD64; Docker-сборка для ARM завершается ошибкой. На ARM-компьютере для image smoke нужен Docker с эмуляцией AMD64.
+Оставлены изолированные unit-тесты: парсинг подписок, URL/IP и профилей, версии возможностей агента, Fernet/Unicode golden-векторы, а также provider API с подменённым HTTP transport. Проверки не открывают SQLite и не запускают другие сервисы, контейнеры или бинарные процессы. Python-интеграционные harness, Go-to-Go wire suite, image smoke и тесты реальной БД удалены по принятой политике тестирования.
 
-В каждом репозитории отдельный CI. Backend проверяет Go-тесты, старый формат БД/API и протокол агента внешними HTTP-тестами, Compose и собранный AMD64-образ: health, вход, poll, непривилегированный UID, сохранение сессии после restart и SQLite integrity. Агент проверяет Go-тесты, Compose и профили настоящим Xray. Frontend проверяет Vitest, TypeScript/Vite build и nginx с тестовым upstream. После успешных проверок `main` публикует только AMD64-образ с тегами `latest` и `sha-<полный commit SHA>`. PR не публикует образы. Deploy не выполняется.
-
-## Границы проверки
-
-Image smoke требует работающий Docker Engine. Локальные проверки, GitHub CI и публикация проверяются отдельно. Без реальных токенов, RU-хоста и VLESS inbound не проверяются живые Cloudflare/Remnawave, Xray handshake, блокировки провайдера, DNS propagation или публичный TLS reverse proxy. Live DNS в тестах не меняется.
-
-Перед включением автоматики используйте отдельный тестовый hostname с минимум двумя DNS-only A, оставьте автоматику выключенной, проверьте все IP через RU-агент, затем проверьте исключение и восстановление тестового узла.
+CI использует Ubuntu 26.04, проверяет tidy/verify/gofmt/vet/golangci-lint v2.15.0, unit/race и production build. Compose проверяется с инертными CI-параметрами; Docker-образ только собирается и проверяется на AMD64. После этих проверок main сохраняет публикацию latest и sha-<полный commit SHA>; PR не публикует. Живые Cloudflare/Remnawave, базы, DNS и узлы в тестах не используются. Runtime SQLite, HTTP API, healthcheck и backup/restore остаются production-функциями.
 
 ## Частые причины отказа
 

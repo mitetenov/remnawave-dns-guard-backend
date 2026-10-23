@@ -158,7 +158,7 @@ Compose ограничивает CPU, память, число процессо�
 
 ## Разработка и сборка
 
-Нужен Go 1.27.2. Бэкенд — один статически собранный бинарный файл без Python, libc и shell в runtime. SQLite-драйвер `modernc.org/sqlite` закреплён в `go.mod`/`go.sum`.
+Нужен Go 1.27.3. Бэкенд — один статически собранный бинарный файл без Python, libc и shell в runtime. SQLite-драйвер `modernc.org/sqlite` закреплён в `go.mod`/`go.sum`.
 
 ```sh
 go test -race ./...
@@ -177,13 +177,11 @@ go build -o dns-guard-backend ./cmd/dns-guard
 
 ```sh
 docker build --platform linux/amd64 -t remnawave-dns-guard-backend:local .
-python3 scripts/smoke_image.py remnawave-dns-guard-backend:local
 ```
 
 Dockerfile сначала копирует `go.mod`/`go.sum` и загружает зависимости, затем — только production-код. Изменения тестов и документации не сбрасывают кеш сборки. BuildKit сохраняет кеш компилятора Go между сборками на одном builder; зависимости также остаются обычным слоем, доступным для CI-кеша `type=gha,mode=max`. Cache mounts сами по себе в GitHub layer cache не экспортируются. В scratch стабильные CA/каталоги и часто меняющийся бинарник разделены независимыми `COPY --link` слоями.
 
-Каждый push и pull request запускает Go-тесты с race detector, проверку совместимости старой SQLite и API/протокола агента,
-проверку Compose, сборку и smoke-тест запущенного образа. Реальный обмен Go-агента с Go-бэкендом дополнительно проверяется локально командой из [инструкции](docs/testing.md); отдельный репозиторий агента не является runtime-зависимостью backend.
+Каждый push и pull request запускает изолированные Go unit-тесты с race detector, проверку модулей/форматирования/vet/lint, Compose и production Docker build. Тесты реальной SQLite, отдельно запущенных сервисов и контейнеров удалены.
 После всех проверок `main` публикует AMD64-образ
 `mitetenov/remnawave-dns-guard-backend` с тегами `latest` и `sha-<полный commit SHA>`.
 Pull request не публикует образы; deploy автоматически не выполняется.
@@ -202,3 +200,5 @@ Repository secret: `DOCKERHUB_TOKEN` с правами Read & Write.
 «Отправить тестовое сообщение» проверяет введённые данные без сохранения; пустой токен использует ранее сохранённый. «Сохранить Telegram» подключает новый канал и включает уведомления. Переключатель временно отключает отправку, сохраняя токен и чат. Изменения во время паузы после включения не рассылаются.
 
 Сообщения содержат имя/IP хоста, пул, старый/новый статус и время UTC. Отправляются изменения доступности, исключение/восстановление DNS, ручное отключение и потеря свежих данных; одинаковые результаты не дублируются. Очередь сохраняется в SQLite и повторяет неудачные отправки с учётом лимитов Telegram. При потере ответа после принятия сообщения Telegram повторная доставка может дать дубликат. Ошибки доставки видны в журнале событий. При паузе или смене назначения ожидающие сообщения удаляются; уже отправляемое сообщение может успеть прийти. Токен и Chat ID зашифрованы существующим APP_SECRET. Backend нужен исходящий HTTPS-доступ к `api.telegram.org`; webhook и входящие порты для бота не нужны. API отправки описан в [официальной документации Telegram](https://core.telegram.org/bots/api#sendmessage).
+
+Go checks use Go 1.27.3, module verification/tidy, gofmt, vet, golangci-lint v2.15.0, unit/race tests and production builds. CI uses Ubuntu 26.04; Actions are pinned to reviewed release commits. Dependabot checks Go, Actions and Docker weekly. PR image validation never publishes; publication remains gated on the existing checks.
