@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-var inconclusiveErrors = map[string]bool{"xray_start_failed": true, "xray_config_invalid": true, "invalid_job": true, "control_unhealthy": true, "control_unreachable": true, "proxy_unavailable": true}
+var inconclusiveErrors = map[string]bool{"xray_start_failed": true, "xray_config_invalid": true, "invalid_job": true, "control_unhealthy": true, "control_unreachable": true, "proxy_unavailable": true, "no_valid_routes": true}
 var knownErrors = map[string]bool{"probe_failed": true, "probe_timeout": true, "xray_start_failed": true, "xray_config_invalid": true, "control_unhealthy": true, "invalid_job": true, "proxy_unavailable": true, "http_error": true, "tls_error": true, "connection_failed": true, "timeout": true, "target_unreachable": true, "tunnel_unreachable": true}
 
 // Older agents use a strict profile decoder and cannot consume new fields.
@@ -31,6 +31,7 @@ func supportsXHTTPExtra(version string) bool { return agentVersionAtLeast(versio
 func supportsALPN(version string) bool       { return agentVersionAtLeast(version, 2) }
 
 func (a *App) agentRoutes() {
+	a.checkerProxyRoutes()
 	a.route("GET /api/agents", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any { return a.s.checkerViews() })
 	})
@@ -51,7 +52,12 @@ func (a *App) agentRoutes() {
 			a.s.transaction(func() {
 				jobs = a.pollChecker(data)
 			})
-			return row{"jobs": jobs, "poll_after_seconds": 10}
+			response := row{"jobs": jobs, "poll_after_seconds": 10}
+			if supportsSOCKS5(data.Version) {
+				response["proxy"] = a.s.checkerProxyConfig(data.AgentID)
+				response["routes"] = routeSelection(a.checker(data.AgentID))
+			}
+			return response
 		})
 	})
 	a.route("POST /api/agent/results", "agent", func(w http.ResponseWriter, r *http.Request) any {
@@ -72,7 +78,7 @@ func (a *App) agentRoutes() {
 				invalid("results")
 			}
 			for key, value := range raw {
-				if !oneOf(key, "job_id", "ok", "latency_ms", "error") || oneOf(key, "job_id", "ok") && string(value) == "null" {
+				if !oneOf(key, "job_id", "ok", "latency_ms", "error", "routes") || oneOf(key, "job_id", "ok") && string(value) == "null" {
 					invalid("results")
 				}
 			}
@@ -81,6 +87,9 @@ func (a *App) agentRoutes() {
 			}
 			if _, ok := raw["ok"]; !ok {
 				invalid("results")
+			}
+			if rawRoutes, ok := raw["routes"]; ok {
+				validateRouteResults(rawRoutes)
 			}
 			v := data.Results[i]
 			if !textLength(v.JobID, 0, 100) || v.Error != nil && !textLength(*v.Error, 0, 1000) || v.LatencyMS != nil && (*v.LatencyMS < 0 || *v.LatencyMS > 180000) {
@@ -93,7 +102,7 @@ func (a *App) agentRoutes() {
 				s := a.s
 				now := nowSeconds()
 				agent := s.one("SELECT * FROM agents WHERE id=?", data.AgentID)
-				if !checkerHealthy(agent, now) {
+				if agent == nil || now-num(agent["last_seen"]) > controlFreshSeconds || !routesEnabled(agent) {
 					return
 				}
 				for _, result := range data.Results {
@@ -104,6 +113,14 @@ func (a *App) agentRoutes() {
 					t := a.target(str(j["target_id"]))
 					p := a.pool(str(t["pool_id"]))
 					if num(p["revision"]) != num(j["revision"]) || !truth(t["manual_enabled"]) {
+						continue
+					}
+					if supportsRoutes(str(agent["version"])) {
+						if result.Routes == nil || (result.Routes.Direct != nil) != directEnabled(agent) || (result.Routes.SOCKS5 != nil) != socksEnabled(agent) {
+							continue
+						}
+						result = aggregateRoutes(result.JobID, normalizeRoutes(agent, result.Routes, now))
+					} else if !checkerHealthy(agent, now) {
 						continue
 					}
 					s.exec("UPDATE jobs SET consumed=1 WHERE id=?", j["id"])

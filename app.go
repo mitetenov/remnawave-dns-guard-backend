@@ -276,6 +276,11 @@ func (a *App) targetViews(rows []row) []row {
 					item[key] = check[key]
 				}
 			}
+			if check != nil && truth(check["route_results"]) {
+				var routes RouteResults
+				mustErr(json.Unmarshal([]byte(str(check["route_results"])), &routes))
+				item["routes"] = routes
+			}
 			if item["outcome"] != nil {
 				item["outcome"] = truth(item["outcome"])
 			}

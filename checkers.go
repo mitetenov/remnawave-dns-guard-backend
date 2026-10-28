@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -8,6 +9,7 @@ import (
 // Registration is implicit in authenticated polls. A checker's schedule and
 // evidence belong to (target, agent), never to the target alone.
 func (s *Store) initializeCheckers() {
+	s.initializeCheckerProxy()
 	columns := map[string]bool{}
 	for _, c := range s.all("PRAGMA table_info(agents)") {
 		columns[str(c["name"])] = true
@@ -36,10 +38,11 @@ func (s *Store) initializeCheckers() {
 			s.exec("INSERT INTO settings VALUES ('multi_checker_migrated','1')")
 		}
 	})
+	s.initializeCheckerRoutes()
 }
 
 func checkerHealthy(agent row, now float64) bool {
-	return agent != nil && truth(agent["healthy"]) && now-num(agent["last_seen"]) <= controlFreshSeconds
+	return agent != nil && (!socksEnabled(agent) || supportsRoutes(str(agent["version"]))) && now-num(agent["last_seen"]) <= controlFreshSeconds && (directReady(agent) || socksReady(agent, now))
 }
 
 func checkFresh(check, agent row, interval, now float64) bool {
@@ -47,7 +50,7 @@ func checkFresh(check, agent row, interval, now float64) bool {
 		return false
 	}
 	checked, err := time.Parse(time.RFC3339Nano, str(check["last_checked_at"]))
-	return err == nil && now-float64(checked.UnixNano())/1e9 < max(float64(leaseSeconds), interval*3)
+	return err == nil && now-float64(checked.UnixNano())/1e9 < max(float64(leaseSeconds), interval*3) && routeEvidenceFresh(check, agent, now)
 }
 
 type probeSummary struct {
@@ -167,12 +170,18 @@ func (s *Store) checkerViews() []row {
 	for _, agent := range s.all("SELECT * FROM agents ORDER BY id") {
 		status := "offline"
 		if now-num(agent["last_seen"]) <= controlFreshSeconds {
-			status = "control_unhealthy"
-			if truth(agent["healthy"]) {
+			switch {
+			case !routesEnabled(agent):
+				status = "paused"
+			case checkerHealthy(agent, now):
 				status = "online"
+			case socksEnabled(agent):
+				status = "proxy_unhealthy"
+			default:
+				status = "control_unhealthy"
 			}
 		}
-		views = append(views, row{"id": agent["id"], "version": agent["version"], "last_seen": iso(fromSeconds(num(agent["last_seen"]))), "healthy": status == "online", "status": status})
+		views = append(views, row{"id": agent["id"], "version": agent["version"], "last_seen": iso(fromSeconds(num(agent["last_seen"]))), "healthy": status == "online", "status": status, "proxy": s.checkerProxyView(agent, now), "routes": row{"direct": directEnabled(agent), "socks5": socksEnabled(agent), "revision": agent["proxy_revision"], "supported": supportsRoutes(str(agent["version"]))}, "direct_healthy": directReady(agent) && now-num(agent["last_seen"]) <= controlFreshSeconds})
 	}
 	return views
 }
@@ -182,8 +191,8 @@ func (a *App) pollChecker(data Poll) []row {
 	s, now := a.s, nowSeconds()
 	jobs := []row{}
 	previous := s.one("SELECT * FROM agents WHERE id=?", data.AgentID)
-	if previous != nil && (!checkerHealthy(previous, now) || !data.ControlOK) {
-		s.exec("UPDATE target_checks SET failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,outcome=NULL WHERE agent_id=?", data.AgentID)
+	if previous != nil && !checkerHealthy(previous, now) {
+		s.exec("UPDATE target_checks SET failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,outcome=NULL,route_results=NULL WHERE agent_id=?", data.AgentID)
 		s.exec("UPDATE jobs SET consumed=1 WHERE agent_id=? AND consumed=0", data.AgentID)
 	}
 	s.exec("INSERT INTO agents (id,last_seen,healthy,version) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen,healthy=excluded.healthy,version=excluded.version", data.AgentID, now, data.ControlOK, data.Version)
@@ -196,12 +205,13 @@ func (a *App) pollChecker(data Poll) []row {
 	}
 	for _, job := range s.all("SELECT jobs.*,targets.pool_id FROM jobs JOIN targets ON targets.id=jobs.target_id WHERE consumed=0 AND expires<=?", now) {
 		s.exec("UPDATE jobs SET consumed=1 WHERE id=?", job["id"])
-		s.exec("UPDATE target_checks SET failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,outcome=NULL WHERE target_id=? AND agent_id=?", job["target_id"], job["agent_id"])
+		s.exec("UPDATE target_checks SET failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,outcome=NULL,route_results=NULL WHERE target_id=? AND agent_id=?", job["target_id"], job["agent_id"])
 		s.event("warning", "check", "Agent "+str(job["agent_id"])+": probe lease expired; no failure counted", job["pool_id"], job["target_id"])
 	}
 	s.exec("DELETE FROM jobs WHERE consumed=1 AND expires<?", now-86400)
 	defer s.refreshProbeTargets()
-	if !data.ControlOK {
+	current := s.one("SELECT * FROM agents WHERE id=?", data.AgentID)
+	if !checkerHealthy(current, now) {
 		return jobs
 	}
 	// Newly registered checkers and newly enrolled targets need no setup in Guard.
@@ -219,7 +229,14 @@ func (a *App) pollChecker(data Poll) []row {
 		id := uid()
 		s.exec("INSERT INTO jobs (id,target_id,agent_id,revision,issued,expires) VALUES (?,?,?,?,?,?)", id, target["id"], data.AgentID, pool["revision"], now, now+leaseSeconds)
 		s.exec("UPDATE target_checks SET next_due=? WHERE target_id=? AND agent_id=?", now+num(pool["interval_seconds"]), target["id"], data.AgentID)
-		jobs = append(jobs, row{"job_id": id, "target_id": target["id"], "ip": target["ip"], "profile": profile, "timeout_seconds": 15})
+		job := row{"job_id": id, "target_id": target["id"], "ip": target["ip"], "profile": profile, "timeout_seconds": 15}
+		if socksEnabled(current) {
+			job["proxy_url"] = s.proxyURL(current)
+		}
+		if supportsRoutes(data.Version) {
+			job["routes"] = routeSelection(current)
+		}
+		jobs = append(jobs, job)
 	}
 	return jobs
 }
@@ -237,7 +254,7 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 	}
 	var outcome, errorValue any
 	if !result.OK && inconclusiveErrors[reason] {
-		failures, successes, errorValue = 0, 0, reason
+		failures, successes, errorValue = int(num(check["failures"])), int(num(check["successes"])), reason
 	} else if result.OK {
 		failures, successes, outcome = 0, min(successes+1, int(num(pool["recovery_threshold"]))), true
 	} else {
@@ -247,6 +264,12 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 		failures, successes, outcome, errorValue = min(failures+1, int(num(pool["failure_threshold"]))), 0, false, reason
 	}
 	s.exec("INSERT INTO target_checks (target_id,agent_id,failures,successes,last_checked_at,last_latency_ms,last_error,outcome) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(target_id,agent_id) DO UPDATE SET failures=excluded.failures,successes=excluded.successes,last_checked_at=excluded.last_checked_at,last_latency_ms=excluded.last_latency_ms,last_error=excluded.last_error,outcome=excluded.outcome", target["id"], agentID, failures, successes, iso(fromSeconds(now)), result.LatencyMS, errorValue, outcome)
+	if result.Routes != nil {
+		raw, _ := json.Marshal(result.Routes)
+		s.exec("UPDATE target_checks SET route_results=? WHERE target_id=? AND agent_id=?", string(raw), target["id"], agentID)
+	} else {
+		s.exec("UPDATE target_checks SET route_results=NULL WHERE target_id=? AND agent_id=?", target["id"], agentID)
+	}
 	summary := s.probeSnapshot().summary(target)
 	target = s.cacheProbeTarget(target, summary)
 	manualPending := target["dns_action"] != nil && !strings.HasPrefix(str(target["dns_action"]), "auto_")
