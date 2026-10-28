@@ -31,6 +31,9 @@ func supportsXHTTPExtra(version string) bool { return agentVersionAtLeast(versio
 func supportsALPN(version string) bool       { return agentVersionAtLeast(version, 2) }
 
 func (a *App) agentRoutes() {
+	a.route("GET /api/agents", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		return a.withStore(func() any { return a.s.checkerViews() })
+	})
 	a.route("POST /api/agent/poll", "agent", func(w http.ResponseWriter, r *http.Request) any {
 		data := Poll{}
 		bodyObject(w, r, &data, []string{"agent_id", "version", "control_ok"}, "control_error")
@@ -46,45 +49,7 @@ func (a *App) agentRoutes() {
 		return a.withStore(func() any {
 			jobs := []row{}
 			a.s.transaction(func() {
-				s := a.s
-				now := nowSeconds()
-				previous := s.one("SELECT * FROM agents WHERE id=?", data.AgentID)
-				if previous != nil && now-num(previous["last_seen"]) > controlFreshSeconds {
-					s.exec("UPDATE targets SET failures=0,successes=0,next_due=0 WHERE last_agent_id=?", data.AgentID)
-				}
-				s.exec("INSERT INTO agents VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen,healthy=excluded.healthy", data.AgentID, now, data.ControlOK)
-				if previous == nil || truth(previous["healthy"]) != data.ControlOK {
-					message, level := "Agent control connectivity unavailable; probing paused", "warning"
-					if data.ControlOK {
-						message, level = "Agent control connectivity healthy", "info"
-					}
-					s.event(level, "system", message, nil, nil)
-				}
-				for _, j := range s.all("SELECT jobs.*,targets.pool_id FROM jobs JOIN targets ON targets.id=jobs.target_id WHERE consumed=0 AND expires<=?", now) {
-					s.exec("UPDATE jobs SET consumed=1 WHERE id=?", j["id"])
-					s.exec("UPDATE targets SET status=CASE WHEN manual_enabled=0 THEN 'disabled' WHEN dns_present=0 THEN 'excluded' ELSE 'unknown' END,failures=0,successes=0,next_due=0 WHERE id=?", j["target_id"])
-					s.event("warning", "check", "Probe lease expired; target health unknown, no failure counted", j["pool_id"], j["target_id"])
-				}
-				s.exec("DELETE FROM jobs WHERE consumed=1 AND expires<?", now-86400)
-				if !data.ControlOK {
-					s.exec("UPDATE targets SET failures=0,successes=0,next_due=0 WHERE last_agent_id=? OR id IN (SELECT target_id FROM jobs WHERE agent_id=? AND consumed=0)", data.AgentID, data.AgentID)
-					s.exec("UPDATE jobs SET consumed=1 WHERE agent_id=? AND consumed=0", data.AgentID)
-					return
-				}
-				for _, t := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id WHERE manual_enabled=1 AND profile IS NOT NULL AND next_due<=? AND (dns_action IS NULL OR dns_action!='replace_ip') AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND consumed=0) ORDER BY next_due,targets.id", now) {
-					if len(jobs) == 4 {
-						break
-					}
-					p := a.pool(str(t["pool_id"]))
-					profile := s.profile(p)
-					if len(profile.XHTTPExtra) > 0 && !supportsXHTTPExtra(data.Version) || len(profile.ALPN) > 0 && !supportsALPN(data.Version) {
-						continue
-					}
-					jid := uid()
-					s.exec("INSERT INTO jobs (id,target_id,agent_id,revision,issued,expires) VALUES (?,?,?,?,?,?)", jid, t["id"], data.AgentID, p["revision"], now, now+leaseSeconds)
-					s.exec("UPDATE targets SET next_due=? WHERE id=?", now+num(p["interval_seconds"]), t["id"])
-					jobs = append(jobs, row{"job_id": jid, "target_id": t["id"], "ip": t["ip"], "profile": profile, "timeout_seconds": 15})
-				}
+				jobs = a.pollChecker(data)
 			})
 			return row{"jobs": jobs, "poll_after_seconds": 10}
 		})
@@ -128,7 +93,7 @@ func (a *App) agentRoutes() {
 				s := a.s
 				now := nowSeconds()
 				agent := s.one("SELECT * FROM agents WHERE id=?", data.AgentID)
-				if agent == nil || !truth(agent["healthy"]) || now-num(agent["last_seen"]) > controlFreshSeconds {
+				if !checkerHealthy(agent, now) {
 					return
 				}
 				for _, result := range data.Results {
@@ -143,54 +108,7 @@ func (a *App) agentRoutes() {
 					}
 					s.exec("UPDATE jobs SET consumed=1 WHERE id=?", j["id"])
 					accepted++
-					reason := ""
-					if result.Error != nil {
-						reason = *result.Error
-					}
-					if !result.OK && inconclusiveErrors[reason] {
-						status := "excluded"
-						if truth(t["dns_present"]) {
-							status = "unknown"
-						}
-						s.exec("UPDATE targets SET failures=0,successes=0,status=?,last_checked_at=?,last_latency_ms=NULL,last_error=?,last_agent_id=? WHERE id=?", status, iso(fromSeconds(now)), reason, data.AgentID, t["id"])
-						s.event("error", "check", "Probe inconclusive: "+reason, p["id"], t["id"])
-						continue
-					}
-					failures, successes := 0, int(num(t["successes"]))+1
-					var errorValue any
-					status := "recovering"
-					if result.OK {
-						if truth(t["dns_present"]) && !truth(t["dns_uncertain"]) {
-							status = "healthy"
-						}
-					} else {
-						failures, successes = int(num(t["failures"]))+1, 0
-						if !knownErrors[reason] {
-							reason = "probe_failed"
-						}
-						errorValue = reason
-						status = "excluded"
-						if truth(t["dns_present"]) {
-							status = "suspect"
-						}
-						if t["status"] == "protected" {
-							status = "protected"
-						}
-					}
-					s.exec("UPDATE targets SET failures=?,successes=?,last_checked_at=?,last_latency_ms=?,last_error=?,status=?,last_agent_id=? WHERE id=?", failures, successes, iso(fromSeconds(now)), result.LatencyMS, errorValue, status, data.AgentID, t["id"])
-					manualPending := t["dns_action"] != nil && !strings.HasPrefix(str(t["dns_action"]), "auto_")
-					if truth(p["automation_enabled"]) && !manualPending {
-						if !result.OK && float64(failures) >= num(p["failure_threshold"]) && (truth(t["dns_present"]) || truth(t["dns_uncertain"])) && status != "protected" {
-							a.reconciler.queueLocked(str(t["id"]), "auto_remove")
-						} else if result.OK && (!truth(t["dns_present"]) || truth(t["dns_uncertain"])) && float64(successes) >= num(p["recovery_threshold"]) {
-							a.reconciler.queueLocked(str(t["id"]), "auto_restore")
-						}
-					}
-					message, level := "Probe failed: "+reason, "warning"
-					if result.OK {
-						message, level = "Probe succeeded", "info"
-					}
-					s.event(level, "check", message, p["id"], t["id"])
+					a.recordProbe(t, p, agent, result, now)
 				}
 			})
 			return row{"accepted": accepted}

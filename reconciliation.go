@@ -124,6 +124,7 @@ func (r *Reconciler) queueLocked(targetID, action string) {
 			}
 			s.exec("UPDATE targets SET manual_enabled=?,status=?,failures=0,successes=0,next_due=0,last_checked_at=NULL,last_error=NULL WHERE id=?", enabled, status, targetID)
 			s.exec("UPDATE jobs SET consumed=1 WHERE target_id=?", targetID)
+			s.exec("DELETE FROM target_checks WHERE target_id=?", targetID)
 		}
 	})
 	r.signal()
@@ -146,18 +147,14 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 		action := str(t["dns_action"])
 		if strings.HasPrefix(action, "auto_") {
 			valid := truth(p["automation_enabled"]) && truth(t["manual_enabled"]) && num(p["revision"]) == num(t["dns_profile_revision"])
+			summary := s.probeSnapshot().summary(t)
 			if action == "auto_remove" {
-				valid = valid && num(t["failures"]) >= num(p["failure_threshold"])
+				valid = valid && summary.Remove
 			} else {
-				valid = valid && num(t["successes"]) >= num(p["recovery_threshold"])
+				valid = valid && summary.Restore
 			}
 			if !valid {
 				s.exec("UPDATE targets SET dns_action=NULL,dns_uncertain=CASE WHEN dns_error IS NULL THEN 0 ELSE dns_uncertain END WHERE id=?", targetID)
-				return nil, nil, false
-			}
-			a := s.one("SELECT * FROM agents WHERE id=?", t["last_agent_id"])
-			if a == nil || !truth(a["healthy"]) || nowSeconds()-num(a["last_seen"]) > controlFreshSeconds {
-				s.exec("UPDATE targets SET dns_next_retry=? WHERE id=?", nowSeconds()+retrySeconds, targetID)
 				return nil, nil, false
 			}
 		}
@@ -251,6 +248,7 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 			}
 			s.exec("UPDATE targets SET ip=dns_new_ip,dns_new_ip=NULL,dns_replace_present=NULL,dns_present=?,dns_uncertain=0,dns_action=NULL,dns_error=NULL,dns_checked_at=?,dns_drift=0,status=?,failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,last_agent_id=NULL WHERE id=?", actual, iso(time.Now()), status, targetID)
 			s.exec("UPDATE jobs SET consumed=1 WHERE target_id=?", targetID)
+			s.exec("DELETE FROM target_checks WHERE target_id=?", targetID)
 			s.event("info", "manual", "Target IP updated; DNS verified and probe counters reset", p["id"], targetID)
 			return
 		}
@@ -360,6 +358,8 @@ func (r *Reconciler) scanPool(poolID string, adopt bool) (int, error) {
 					s.event("warning", "dns", "External DNS change detected; actual A record "+state, poolID, t["id"])
 				}
 				s.exec("UPDATE targets SET failures=0,successes=0 WHERE id=?", t["id"])
+				s.exec("DELETE FROM target_checks WHERE target_id=?", t["id"])
+				s.exec("UPDATE jobs SET consumed=1 WHERE target_id=?", t["id"])
 				if !truth(t["manual_enabled"]) {
 					status = "disabled"
 				} else if present {
