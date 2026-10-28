@@ -67,10 +67,11 @@ type Poll struct {
 	ControlError *string `json:"control_error"`
 }
 type Result struct {
-	JobID     string   `json:"job_id"`
-	OK        bool     `json:"ok"`
-	LatencyMS *float64 `json:"latency_ms"`
-	Error     *string  `json:"error"`
+	Routes    *RouteResults `json:"routes,omitempty"`
+	JobID     string        `json:"job_id"`
+	OK        bool          `json:"ok"`
+	LatencyMS *float64      `json:"latency_ms"`
+	Error     *string       `json:"error"`
 }
 type Results struct {
 	AgentID string   `json:"agent_id"`
