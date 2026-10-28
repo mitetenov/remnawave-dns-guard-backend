@@ -96,7 +96,8 @@ func (a *App) poolRoutes() {
 			a.s.transaction(func() {
 				a.s.exec("UPDATE pools SET profile=?,revision=revision+1 WHERE id=?", a.s.encrypt(data), id)
 				a.s.exec("UPDATE jobs SET consumed=1 WHERE target_id IN (SELECT id FROM targets WHERE pool_id=?)", id)
-				a.s.exec("UPDATE targets SET failures=0,successes=0,next_due=0,status=CASE WHEN manual_enabled=0 THEN 'disabled' WHEN dns_present=0 THEN 'excluded' ELSE 'unknown' END WHERE pool_id=?", id)
+				a.s.exec("DELETE FROM target_checks WHERE target_id IN (SELECT id FROM targets WHERE pool_id=?)", id)
+				a.s.exec("UPDATE targets SET failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,last_agent_id=NULL,status=CASE WHEN manual_enabled=0 THEN 'disabled' WHEN dns_present=0 THEN 'excluded' ELSE 'unknown' END WHERE pool_id=?", id)
 				a.s.event("info", "manual", "Probe profile updated; pending jobs invalidated", id, nil)
 			})
 			return row{"ok": true}
@@ -169,7 +170,7 @@ func (a *App) poolRoutes() {
 			if a.s.one("SELECT id FROM targets WHERE pool_id=? AND manual_enabled=1", id) == nil {
 				fail(409, "Добавьте или включите хотя бы один узел для проверки")
 			}
-			a.s.exec("UPDATE targets SET next_due=0 WHERE pool_id=? AND manual_enabled=1", id)
+			a.s.exec("UPDATE target_checks SET next_due=0 WHERE target_id IN (SELECT id FROM targets WHERE pool_id=? AND manual_enabled=1)", id)
 			return row{"ok": true}
 		})
 	})

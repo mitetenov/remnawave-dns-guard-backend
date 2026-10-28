@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 )
 
 type apiError struct {
@@ -257,39 +256,32 @@ func poolView(p row) row {
 	return value
 }
 func (a *App) targetViews(rows []row) []row {
-	intervals := map[string]float64{}
-	for _, p := range a.s.all("SELECT id,interval_seconds FROM pools") {
-		intervals[str(p["id"])] = num(p["interval_seconds"])
-	}
-	agents := map[string]row{}
-	for _, v := range a.s.all("SELECT * FROM agents") {
-		agents[str(v["id"])] = v
-	}
-	now := nowSeconds()
+	view := a.s.probeSnapshot()
 	out := []row{}
-	for _, t := range rows {
-		value := row{}
-		for k, v := range t {
-			if !oneOf(k, "next_due", "last_agent_id", "dns_operation_id", "dns_previous_enabled", "dns_profile_revision", "dns_next_retry", "dns_action", "dns_new_ip", "dns_replace_present") {
-				value[k] = v
-			}
+	for _, target := range rows {
+		value := view.summary(target).project(target)
+		for _, key := range []string{"next_due", "last_agent_id", "dns_operation_id", "dns_previous_enabled", "dns_profile_revision", "dns_next_retry", "dns_action", "dns_new_ip", "dns_replace_present"} {
+			delete(value, key)
 		}
 		for _, key := range []string{"manual_enabled", "dns_present", "dns_uncertain", "dns_drift"} {
 			value[key] = truth(value[key])
 		}
-		value["dns_pending_action"] = t["dns_action"]
-		fresh := false
-		if stamp := str(t["last_checked_at"]); stamp != "" {
-			if checked, e := time.Parse(time.RFC3339Nano, stamp); e == nil {
-				window := max(float64(leaseSeconds), intervals[str(t["pool_id"])]*3)
-				agent := agents[str(t["last_agent_id"])]
-				fresh = fromSeconds(now).Before(checked.Add(time.Duration(window*float64(time.Second)))) && agent != nil && truth(agent["healthy"]) && now-num(agent["last_seen"]) <= controlFreshSeconds
+		value["dns_pending_action"] = target["dns_action"]
+		checks := []row{}
+		for _, agent := range view.agents {
+			check := view.checks[str(target["id"])][str(agent["id"])]
+			item := row{"agent_id": agent["id"], "fresh": checkFresh(check, agent, num(view.pools[str(target["pool_id"])]["interval_seconds"]), view.now), "failures": 0, "successes": 0, "last_checked_at": nil, "last_latency_ms": nil, "last_error": nil, "outcome": nil}
+			if check != nil {
+				for _, key := range []string{"failures", "successes", "last_checked_at", "last_latency_ms", "last_error", "outcome"} {
+					item[key] = check[key]
+				}
 			}
+			if item["outcome"] != nil {
+				item["outcome"] = truth(item["outcome"])
+			}
+			checks = append(checks, item)
 		}
-		value["probe_fresh"], value["last_status"] = fresh, t["status"]
-		if truth(t["manual_enabled"]) && t["last_checked_at"] != nil && !fresh {
-			value["status"] = "stale"
-		}
+		value["checks"] = checks
 		out = append(out, value)
 	}
 	return out
@@ -297,14 +289,18 @@ func (a *App) targetViews(rows []row) []row {
 func (a *App) targetView(t row) row { return a.targetViews([]row{t})[0] }
 func (a *App) settingsView() row {
 	s := a.s
-	agent := s.one("SELECT * FROM agents ORDER BY last_seen DESC LIMIT 1")
+	agents := s.checkerViews()
 	var seen any
-	healthy := false
-	if agent != nil {
-		seen = iso(fromSeconds(num(agent["last_seen"])))
-		healthy = truth(agent["healthy"]) && nowSeconds()-num(agent["last_seen"]) <= controlFreshSeconds
+	healthy := 0
+	for _, agent := range agents {
+		if seen == nil || str(agent["last_seen"]) > str(seen) {
+			seen = agent["last_seen"]
+		}
+		if truth(agent["healthy"]) {
+			healthy++
+		}
 	}
-	return row{"cloudflare_configured": s.get("cloudflare_api_token") != "", "remnawave_configured": s.get("remnawave_url") != "" && s.get("remnawave_api_token") != "", "remnawave_url": s.get("remnawave_url"), "agent_last_seen": seen, "agent_healthy": healthy}
+	return row{"cloudflare_configured": s.get("cloudflare_api_token") != "", "remnawave_configured": s.get("remnawave_url") != "" && s.get("remnawave_api_token") != "", "remnawave_url": s.get("remnawave_url"), "agent_last_seen": seen, "agent_healthy": healthy > 0, "agents": agents, "agents_total": len(agents), "agents_healthy": healthy}
 }
 func (a *App) cloudflare() *Cloudflare {
 	a.s.mu.Lock()

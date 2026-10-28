@@ -190,7 +190,6 @@ func (s *Store) initialize(c Config) (err error) {
  CREATE TABLE IF NOT EXISTS targets (id TEXT PRIMARY KEY, pool_id TEXT REFERENCES pools(id), name TEXT, ip TEXT, remnawave_uuid TEXT, manual_enabled INTEGER DEFAULT 1, status TEXT DEFAULT 'unknown', dns_present INTEGER DEFAULT 1, dns_uncertain INTEGER DEFAULT 0, failures INTEGER DEFAULT 0, successes INTEGER DEFAULT 0, last_checked_at TEXT, last_latency_ms REAL, last_error TEXT, next_due REAL DEFAULT 0, last_agent_id TEXT, UNIQUE(pool_id,ip));
  CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, last_seen REAL, healthy INTEGER);
  CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, target_id TEXT REFERENCES targets(id) ON DELETE CASCADE, agent_id TEXT, revision INTEGER, issued REAL, expires REAL, consumed INTEGER DEFAULT 0);
- CREATE UNIQUE INDEX IF NOT EXISTS target_active_job ON jobs(target_id) WHERE consumed=0;
  CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, created_at TEXT, level TEXT, type TEXT, message TEXT, pool_id TEXT, target_id TEXT);`)
 	migrations := map[string]map[string]string{"targets": {"dns_uncertain": "INTEGER DEFAULT 0", "last_agent_id": "TEXT", "dns_new_ip": "TEXT", "dns_replace_present": "INTEGER", "dns_action": "TEXT", "dns_operation_id": "TEXT", "dns_previous_enabled": "INTEGER", "dns_profile_revision": "INTEGER", "dns_next_retry": "REAL DEFAULT 0", "dns_error": "TEXT", "dns_checked_at": "TEXT", "dns_drift": "INTEGER DEFAULT 0"}, "pools": {"dns_checked_at": "TEXT", "dns_error": "TEXT", "dns_next_check": "REAL DEFAULT 0", "dns_drift_count": "INTEGER DEFAULT 0"}}
 	for table, columns := range migrations {
@@ -204,6 +203,7 @@ func (s *Store) initialize(c Config) (err error) {
 			}
 		}
 	}
+	s.initializeCheckers()
 	revision := authRevision(c)
 	previous := s.one("SELECT value FROM settings WHERE key='auth_revision'")
 	if previous == nil || !constantEqual(str(previous["value"]), revision) {
