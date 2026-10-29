@@ -88,7 +88,7 @@ func (a *App) notificationRoutes() {
 		var token, chat string
 		a.withStore(func() any { token, chat = a.telegramCredentials(data); return nil })
 		validateTelegram(token, chat)
-		if err := a.notifier.send(r.Context(), token, chat, "DNS Guard · Тестовое уведомление\nTelegram подключён. Сюда будут приходить изменения статусов хостов."); err != nil {
+		if err := a.notifier.send(r.Context(), token, chat, "DNS Guard · Тестовое уведомление\nTelegram подключён. Сюда будут приходить уведомления об отключении и восстановлении хостов."); err != nil {
 			fail(502, err.Error())
 		}
 		return row{"ok": true, "message": "Тестовое сообщение отправлено в Telegram."}
@@ -109,6 +109,9 @@ func (s *Store) initializeNotifications() {
  SELECT t.id,t.name AS target_name,t.ip,p.name AS pool_name,p.hostname,t.status
  FROM targets t JOIN pools p ON p.id=t.pool_id;`)
 	s.exec(`INSERT INTO notification_target_status SELECT id,status FROM notification_target_states WHERE true ON CONFLICT(target_id) DO NOTHING`)
+	// Drop intermediate-status messages queued by an earlier release before
+	// starting delivery. Keep terminal messages and their retry state intact.
+	s.exec(`DELETE FROM notification_outbox WHERE COALESCE(status,'') NOT IN ` + notificationStatusesSQL)
 	s.exec(`CREATE TRIGGER IF NOT EXISTS notification_target_insert AFTER INSERT ON targets BEGIN
  INSERT INTO notification_target_status SELECT id,status FROM notification_target_states WHERE id=NEW.id;
  END;
@@ -120,10 +123,11 @@ func (s *Store) initializeNotifications() {
 }
 
 const notificationBaselineSQL = `INSERT INTO notification_target_status SELECT id,status FROM notification_target_states WHERE true ON CONFLICT(target_id) DO UPDATE SET status=excluded.status WHERE notification_target_status.status!=excluded.status`
+const notificationStatusesSQL = `('excluded','disabled','healthy')`
 const notificationEnqueueSQL = `INSERT INTO notification_outbox (target_name,ip,pool_name,hostname,previous_status,status,created_at)
  SELECT v.target_name,v.ip,v.pool_name,v.hostname,n.status,v.status,strftime('%Y-%m-%dT%H:%M:%fZ','now')
  FROM notification_target_states v JOIN notification_target_status n ON n.target_id=v.id
- WHERE v.status!=n.status AND (SELECT enabled FROM notification_control WHERE id=1)=1`
+ WHERE v.status!=n.status AND v.status IN ` + notificationStatusesSQL + ` AND (SELECT enabled FROM notification_control WHERE id=1)=1`
 
 type Notifier struct {
 	s       *Store
