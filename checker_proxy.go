@@ -47,7 +47,7 @@ func (s *Store) initializeCheckerProxy() {
 		existing[str(c["name"])] = true
 	}
 	for name, definition := range map[string]string{
-		"proxy_url": "TEXT", "proxy_revision": "INTEGER NOT NULL DEFAULT 0", "proxy_applied_revision": "INTEGER NOT NULL DEFAULT 0", "proxy_healthy": "INTEGER NOT NULL DEFAULT 0", "proxy_checked_at": "REAL", "proxy_latency_ms": "REAL", "proxy_exit_ip": "TEXT", "proxy_test_id": "TEXT", "proxy_test_requested": "REAL", "proxy_test_result": "TEXT",
+		"proxy_url": "TEXT", "proxy_revision": "INTEGER NOT NULL DEFAULT 0", "proxy_applied_revision": "INTEGER NOT NULL DEFAULT 0", "proxy_healthy": "INTEGER NOT NULL DEFAULT 0", "proxy_checked_at": "REAL", "proxy_latency_ms": "REAL", "proxy_exit_ip": "TEXT", "proxy_test_id": "TEXT", "proxy_test_requested": "REAL", "proxy_test_result": "TEXT", "proxy_test_url": "TEXT", "proxy_test_draft": "INTEGER NOT NULL DEFAULT 0", "proxy_test_latency_ms": "REAL", "proxy_test_exit_ip": "TEXT", "proxy_test_checked_at": "REAL",
 	} {
 		if !existing[name] {
 			s.exec("ALTER TABLE agents ADD COLUMN " + name + " " + definition)
@@ -74,7 +74,7 @@ func (s *Store) proxyURL(agent row) string {
 }
 
 func proxyView(agent row, now float64) row {
-	view := row{"configured": truth(agent["proxy_url"]), "supported": supportsSOCKS5(str(agent["version"])), "endpoint": "", "healthy": proxyReady(agent, now), "checked_at": nil, "latency_ms": agent["proxy_latency_ms"], "exit_ip": agent["proxy_exit_ip"], "test": nil}
+	view := row{"configured": truth(agent["proxy_url"]), "supported": supportsSOCKS5(str(agent["version"])), "endpoint": "", "healthy": proxyReady(agent, now), "checked_at": nil, "latency_ms": agent["proxy_latency_ms"], "exit_ip": agent["proxy_exit_ip"], "test": nil, "draft_test_supported": supportsProxyPreview(str(agent["version"]))}
 	if agent["proxy_checked_at"] != nil {
 		view["checked_at"] = iso(fromSeconds(num(agent["proxy_checked_at"])))
 	}
@@ -86,7 +86,10 @@ func proxyView(agent row, now float64) row {
 				status = "timeout"
 			}
 		}
-		view["test"] = row{"id": agent["proxy_test_id"], "status": status}
+		view["test"] = row{"id": agent["proxy_test_id"], "status": status, "draft": truth(agent["proxy_test_draft"]), "endpoint": "", "latency_ms": agent["proxy_test_latency_ms"], "exit_ip": agent["proxy_test_exit_ip"], "checked_at": nil}
+		if agent["proxy_test_checked_at"] != nil {
+			view["test"].(row)["checked_at"] = iso(fromSeconds(num(agent["proxy_test_checked_at"])))
+		}
 	}
 	return view
 }
@@ -97,13 +100,16 @@ func (s *Store) checkerProxyView(agent row, now float64) row {
 		u, _ := url.Parse(raw)
 		view["endpoint"] = u.Scheme + "://" + u.Host
 	}
+	if view["test"] != nil {
+		view["test"].(row)["endpoint"] = proxyEndpoint(s.proxyTestURL(agent))
+	}
 	return view
 }
 
 func (s *Store) checkerProxyConfig(id string) row {
 	agent := s.one("SELECT * FROM agents WHERE id=?", id)
 	value := row{"url": s.proxyURL(agent), "revision": agent["proxy_revision"]}
-	if truth(agent["proxy_test_id"]) && !truth(agent["proxy_test_result"]) && nowSeconds()-num(agent["proxy_test_requested"]) <= 60 {
+	if !supportsProxyPreview(str(agent["version"])) && !truth(agent["proxy_test_draft"]) && proxyTestPending(agent, nowSeconds()) {
 		value["test_id"] = agent["proxy_test_id"]
 	}
 	return value
@@ -130,7 +136,9 @@ type proxyReport struct {
 
 func (a *App) checkerProxyRoutes() {
 	a.checkerRoutes()
+	a.proxyPreviewRoute()
 	a.route("PUT /api/agents/{id}/proxy", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		w.Header().Set("Cache-Control", "no-store")
 		var input struct {
 			URL string `json:"url"`
 		}
@@ -149,32 +157,48 @@ func (a *App) checkerProxyRoutes() {
 				encrypted = a.s.cipher.encrypt([]byte(input.URL))
 			}
 			a.s.transaction(func() {
-				a.s.exec("UPDATE agents SET proxy_url=?,socks5_enabled=CASE WHEN ? IS NULL THEN 0 ELSE socks5_enabled END,proxy_revision=proxy_revision+1,proxy_healthy=0,proxy_checked_at=NULL,proxy_latency_ms=NULL,proxy_exit_ip=NULL,proxy_test_id=NULL,proxy_test_requested=NULL,proxy_test_result=NULL WHERE id=?", encrypted, encrypted, agent["id"])
+				a.s.exec("UPDATE agents SET proxy_url=?,socks5_enabled=CASE WHEN ? IS NULL THEN 0 ELSE socks5_enabled END,proxy_revision=proxy_revision+1,proxy_healthy=0,proxy_checked_at=NULL,proxy_latency_ms=NULL,proxy_exit_ip=NULL,proxy_test_id=NULL,proxy_test_requested=NULL,proxy_test_result=NULL,proxy_test_url=NULL,proxy_test_draft=0,proxy_test_latency_ms=NULL,proxy_test_exit_ip=NULL,proxy_test_checked_at=NULL WHERE id=?", encrypted, encrypted, agent["id"])
 				a.s.resetChecker(str(agent["id"]))
 				a.s.refreshProbeTargets()
 				a.s.event("info", "system", "Checker "+str(agent["id"])+": proxy settings updated", nil, nil)
 			})
-			return a.s.checkerProxyView(a.checker(str(agent["id"])), nowSeconds())
+			return a.s.checkerProxyDetail(a.checker(str(agent["id"])), nowSeconds())
 		})
 	})
 	a.route("POST /api/agents/{id}/proxy/test", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		w.Header().Set("Cache-Control", "no-store")
+		var input struct {
+			URL *string `json:"url"`
+		}
+		if r.ContentLength != 0 {
+			bodyObject(w, r, &input, nil)
+		}
+		if input.URL != nil && (*input.URL == "" || !validProxyURL(*input.URL)) {
+			invalid("url")
+		}
 		return a.withStore(func() any {
 			agent := a.checker(r.PathValue("id"))
-			if !truth(agent["proxy_url"]) {
-				fail(409, "Сначала сохраните SOCKS5-прокси")
+			value := a.s.proxyURL(agent)
+			if input.URL != nil {
+				value = *input.URL
+			}
+			if value == "" {
+				fail(409, "Введите SOCKS5-прокси для проверки")
 			}
 			if !supportsSOCKS5(str(agent["version"])) {
-				fail(409, "Обновите чекер до версии 1.4.0 или новее")
+				fail(409, "Обновите агент до версии 1.4.0 или новее")
+			}
+			draft := value != a.s.proxyURL(agent)
+			if draft && !supportsProxyPreview(str(agent["version"])) {
+				fail(409, "Для проверки до сохранения обновите агент до версии 1.5.0 или новее")
 			}
 			if nowSeconds()-num(agent["last_seen"]) > controlFreshSeconds {
-				fail(409, "Чекер не на связи")
+				fail(409, "Агент не на связи")
 			}
-			if !truth(agent["proxy_test_id"]) || truth(agent["proxy_test_result"]) || nowSeconds()-num(agent["proxy_test_requested"]) > 60 {
-				a.s.exec("UPDATE agents SET proxy_test_id=?,proxy_test_requested=?,proxy_test_result=NULL WHERE id=?", uid(), nowSeconds(), agent["id"])
-			}
-			return a.s.checkerProxyView(a.checker(str(agent["id"])), nowSeconds())
+			return a.queueProxyTest(agent, value, draft)
 		})
 	})
+
 	a.route("POST /api/agent/proxy-status", "agent", func(w http.ResponseWriter, r *http.Request) any {
 		var report proxyReport
 		bodyObject(w, r, &report, []string{"agent_id", "revision", "ok"}, "latency_ms")
@@ -195,12 +219,12 @@ func (a *App) checkerProxyRoutes() {
 			a.s.transaction(func() {
 				if report.Checked == nil || *report.Checked {
 					a.s.exec("UPDATE agents SET proxy_applied_revision=?,proxy_healthy=?,proxy_checked_at=?,proxy_latency_ms=?,proxy_exit_ip=? WHERE id=?", report.Revision, report.OK, nowSeconds(), report.LatencyMS, report.ExitIP, report.AgentID)
-					if report.TestID != "" && report.TestID == str(agent["proxy_test_id"]) && !truth(agent["proxy_test_result"]) && nowSeconds()-num(agent["proxy_test_requested"]) <= 60 {
+					if !supportsProxyPreview(str(agent["version"])) && !truth(agent["proxy_test_draft"]) && proxyTestMatches(agent, report.TestID, nowSeconds()) {
 						status := "failed"
 						if report.OK {
 							status = "passed"
 						}
-						a.s.exec("UPDATE agents SET proxy_test_result=? WHERE id=?", status, report.AgentID)
+						a.s.exec("UPDATE agents SET proxy_test_result=?,proxy_test_latency_ms=?,proxy_test_exit_ip=?,proxy_test_checked_at=? WHERE id=?", status, report.LatencyMS, report.ExitIP, nowSeconds(), report.AgentID)
 					}
 				}
 				if report.ControlOK != nil {
