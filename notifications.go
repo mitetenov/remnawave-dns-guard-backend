@@ -74,7 +74,7 @@ func (a *App) notificationRoutes() {
 					// A pause or destination change discards pending messages. Resuming
 					// starts from the current state instead of replaying old changes.
 					a.s.exec("DELETE FROM notification_outbox")
-					a.s.exec(notificationBaselineSQL)
+					a.s.exec(notificationResetSQL)
 				}
 				a.s.exec("UPDATE notification_control SET enabled=? WHERE id=1", enabled)
 				a.s.event("info", "system", "Telegram notification settings updated", nil, nil)
@@ -98,7 +98,8 @@ func (a *App) notificationRoutes() {
 // The worker refreshes the same Go projection as targetViews before reading
 // this view, including transitions caused by checker heartbeat expiry.
 func (s *Store) initializeNotifications() {
-	s.exec(`CREATE TABLE IF NOT EXISTS notification_control (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0);
+	s.transaction(func() {
+		s.exec(`CREATE TABLE IF NOT EXISTS notification_control (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0);
  INSERT OR IGNORE INTO notification_control VALUES (1,0);
  CREATE TABLE IF NOT EXISTS notification_target_status (target_id TEXT PRIMARY KEY REFERENCES targets(id) ON DELETE CASCADE, status TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS notification_outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, target_name TEXT, ip TEXT, pool_name TEXT, hostname TEXT, previous_status TEXT, status TEXT, created_at TEXT, attempts INTEGER DEFAULT 0, next_retry REAL DEFAULT 0);
@@ -106,28 +107,42 @@ func (s *Store) initializeNotifications() {
  DROP TRIGGER IF EXISTS notification_target_update;
  DROP VIEW IF EXISTS notification_target_states;
  CREATE VIEW notification_target_states AS
- SELECT t.id,t.name AS target_name,t.ip,p.name AS pool_name,p.hostname,t.status
+ SELECT t.id,t.name AS target_name,t.ip,p.name AS pool_name,p.hostname,t.status,t.dns_present
  FROM targets t JOIN pools p ON p.id=t.pool_id;`)
-	s.exec(`INSERT INTO notification_target_status SELECT id,status FROM notification_target_states WHERE true ON CONFLICT(target_id) DO NOTHING`)
-	// Drop intermediate-status messages queued by an earlier release before
-	// starting delivery. Keep terminal messages and their retry state intact.
-	s.exec(`DELETE FROM notification_outbox WHERE COALESCE(status,'') NOT IN ` + notificationStatusesSQL)
-	s.exec(`CREATE TRIGGER IF NOT EXISTS notification_target_insert AFTER INSERT ON targets BEGIN
- INSERT INTO notification_target_status SELECT id,status FROM notification_target_states WHERE id=NEW.id;
+		added := true
+		for _, column := range s.all("PRAGMA table_info(notification_target_status)") {
+			if column["name"] == "terminal_status" {
+				added = false
+			}
+		}
+		if added {
+			s.exec(`ALTER TABLE notification_target_status ADD COLUMN terminal_status TEXT NOT NULL DEFAULT 'healthy' CHECK(terminal_status IN ('healthy','excluded','disabled'))`)
+			// Seed existing outages without treating loss of freshness as an outage.
+			s.exec(`UPDATE notification_target_status SET terminal_status=COALESCE((SELECT ` + notificationSeedSQL + ` FROM notification_target_states v WHERE v.id=target_id),'healthy')`)
+		}
+		s.exec(`INSERT INTO notification_target_status (target_id,status,terminal_status) SELECT v.id,v.status,` + notificationSeedSQL + ` FROM notification_target_states v WHERE true ON CONFLICT(target_id) DO NOTHING`)
+		// Old stale/suspect/startup -> healthy messages are not real recoveries.
+		// Preserve known outage/recovery messages and their delivery retry state.
+		s.exec(`DELETE FROM notification_outbox WHERE COALESCE(status,'') NOT IN ('excluded','disabled','healthy') OR (status='healthy' AND COALESCE(previous_status,'') NOT IN ('excluded','disabled','recovering'))`)
+		s.exec(`CREATE TRIGGER notification_target_insert AFTER INSERT ON targets BEGIN
+ INSERT INTO notification_target_status (target_id,status,terminal_status) SELECT v.id,v.status,` + notificationSeedSQL + ` FROM notification_target_states v WHERE v.id=NEW.id;
  END;
- CREATE TRIGGER IF NOT EXISTS notification_target_update AFTER UPDATE OF status ON targets BEGIN
+ CREATE TRIGGER notification_target_update AFTER UPDATE OF status ON targets BEGIN
  ` + notificationEnqueueSQL + ` AND v.id=NEW.id;
- INSERT INTO notification_target_status SELECT id,status FROM notification_target_states WHERE id=NEW.id
- ON CONFLICT(target_id) DO UPDATE SET status=excluded.status;
+ ` + notificationObserveSQL("v.id=NEW.id") + `;
  END;`)
+	})
 }
 
-const notificationBaselineSQL = `INSERT INTO notification_target_status SELECT id,status FROM notification_target_states WHERE true ON CONFLICT(target_id) DO UPDATE SET status=excluded.status WHERE notification_target_status.status!=excluded.status`
-const notificationStatusesSQL = `('excluded','disabled','healthy')`
-const notificationEnqueueSQL = `INSERT INTO notification_outbox (target_name,ip,pool_name,hostname,previous_status,status,created_at)
- SELECT v.target_name,v.ip,v.pool_name,v.hostname,n.status,v.status,strftime('%Y-%m-%dT%H:%M:%fZ','now')
+const notificationSeedSQL = `CASE WHEN v.status IN ('excluded','disabled') THEN v.status WHEN v.status='recovering' OR (v.status='stale' AND v.dns_present=0) THEN 'excluded' ELSE 'healthy' END`
+const notificationResetSQL = `INSERT INTO notification_target_status (target_id,status,terminal_status) SELECT v.id,v.status,` + notificationSeedSQL + ` FROM notification_target_states v WHERE true ON CONFLICT(target_id) DO UPDATE SET status=excluded.status,terminal_status=excluded.terminal_status`
+
+var notificationNextStateSQL, notificationEventSQL = notificationPolicySQL()
+var notificationBaselineSQL = notificationObserveSQL("true")
+var notificationEnqueueSQL = `INSERT INTO notification_outbox (target_name,ip,pool_name,hostname,previous_status,status,created_at)
+ SELECT v.target_name,v.ip,v.pool_name,v.hostname,n.terminal_status,v.status,strftime('%Y-%m-%dT%H:%M:%fZ','now')
  FROM notification_target_states v JOIN notification_target_status n ON n.target_id=v.id
- WHERE v.status!=n.status AND v.status IN ` + notificationStatusesSQL + ` AND (SELECT enabled FROM notification_control WHERE id=1)=1`
+ WHERE ` + notificationEventSQL + ` AND (SELECT enabled FROM notification_control WHERE id=1)=1`
 
 type Notifier struct {
 	s       *Store
