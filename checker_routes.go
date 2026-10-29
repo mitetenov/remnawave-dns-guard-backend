@@ -160,6 +160,7 @@ func (s *Store) initializeCheckerRoutes() {
 func (a *App) checkerView(id string) row {
 	for _, value := range a.s.checkerViews() {
 		if value["id"] == id {
+			value["proxy"] = a.s.checkerProxyDetail(a.checker(id), nowSeconds())
 			return value
 		}
 	}
@@ -169,9 +170,11 @@ func (a *App) checkerView(id string) row {
 
 func (a *App) checkerRoutes() {
 	a.route("GET /api/agents/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		w.Header().Set("Cache-Control", "no-store")
 		return a.withStore(func() any { return a.checkerView(r.PathValue("id")) })
 	})
 	a.route("PATCH /api/agents/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		w.Header().Set("Cache-Control", "no-store")
 		var input struct {
 			Direct *bool `json:"direct_enabled"`
 			SOCKS5 *bool `json:"socks5_enabled"`
@@ -197,7 +200,7 @@ func (a *App) checkerRoutes() {
 			}
 			if direct != directEnabled(agent) || socks != socksEnabled(agent) {
 				a.s.transaction(func() {
-					a.s.exec("UPDATE agents SET direct_enabled=?,socks5_enabled=?,proxy_revision=proxy_revision+1,proxy_applied_revision=0,proxy_healthy=0,proxy_test_id=NULL,proxy_test_requested=NULL,proxy_test_result=NULL WHERE id=?", direct, socks, agent["id"])
+					a.s.exec("UPDATE agents SET direct_enabled=?,socks5_enabled=?,proxy_revision=proxy_revision+1,proxy_applied_revision=0,proxy_healthy=0,proxy_test_id=NULL,proxy_test_requested=NULL,proxy_test_result=NULL,proxy_test_url=NULL,proxy_test_draft=0,proxy_test_latency_ms=NULL,proxy_test_exit_ip=NULL,proxy_test_checked_at=NULL WHERE id=?", direct, socks, agent["id"])
 					a.s.resetChecker(str(agent["id"]))
 					a.s.refreshProbeTargets()
 					a.s.event("info", "system", "Agent "+str(agent["id"])+": probe routes updated", nil, nil)

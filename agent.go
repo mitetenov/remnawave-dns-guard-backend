@@ -56,6 +56,11 @@ func (a *App) agentRoutes() {
 			if supportsSOCKS5(data.Version) {
 				response["proxy"] = a.s.checkerProxyConfig(data.AgentID)
 				response["routes"] = routeSelection(a.checker(data.AgentID))
+				if supportsProxyPreview(data.Version) {
+					if test := a.s.pendingProxyTest(a.checker(data.AgentID)); test != nil {
+						response["proxy_test"] = test
+					}
+				}
 			}
 			return response
 		})
