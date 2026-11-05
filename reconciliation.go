@@ -79,7 +79,7 @@ func observedStatus(t row, present, uncertain bool) string {
 		return "disabled"
 	}
 	if t["last_checked_at"] == nil {
-		if present {
+		if present || oneOf(str(t["dns_action"]), "enroll", "enable") {
 			return "unknown"
 		}
 		return "excluded"
@@ -110,6 +110,10 @@ func (r *Reconciler) queueLocked(targetID, action string) {
 		if t == nil {
 			return
 		}
+		// Retrying activation must preserve its new probe streak and DNS retry.
+		if oneOf(action, "enroll", "enable") && t["dns_action"] == action {
+			return
+		}
 		operation, previous := any(uid()), t["manual_enabled"]
 		if t["dns_action"] == action {
 			operation, previous = t["dns_operation_id"], t["dns_previous_enabled"]
@@ -122,7 +126,7 @@ func (r *Reconciler) queueLocked(targetID, action string) {
 			if enabled {
 				status = "unknown"
 			}
-			s.exec("UPDATE targets SET manual_enabled=?,status=?,failures=0,successes=0,next_due=0,last_checked_at=NULL,last_error=NULL WHERE id=?", enabled, status, targetID)
+			s.exec("UPDATE targets SET manual_enabled=?,status=?,failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,last_agent_id=NULL WHERE id=?", enabled, status, targetID)
 			s.exec("UPDATE jobs SET consumed=1 WHERE target_id=?", targetID)
 			s.exec("DELETE FROM target_checks WHERE target_id=?", targetID)
 		}
@@ -145,16 +149,11 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 		}
 		p := s.one("SELECT * FROM pools WHERE id=?", t["pool_id"])
 		action := str(t["dns_action"])
-		if strings.HasPrefix(action, "auto_") {
-			valid := truth(p["automation_enabled"]) && truth(t["manual_enabled"]) && num(p["revision"]) == num(t["dns_profile_revision"])
-			summary := s.probeSnapshot().summary(t)
-			if action == "auto_remove" {
-				valid = valid && summary.Remove
-			} else {
-				valid = valid && summary.Restore
-			}
-			if !valid {
-				s.exec("UPDATE targets SET dns_action=NULL,dns_uncertain=CASE WHEN dns_error IS NULL THEN 0 ELSE dns_uncertain END WHERE id=?", targetID)
+		if oneOf(action, "enroll", "enable") || strings.HasPrefix(action, "auto_") {
+			if !s.probeSnapshot().summary(t).permitsDNS(t, p) {
+				if strings.HasPrefix(action, "auto_") {
+					s.exec("UPDATE targets SET dns_action=NULL,dns_uncertain=CASE WHEN dns_error IS NULL THEN 0 ELSE dns_uncertain END WHERE id=?", targetID)
+				}
 				return nil, nil, false
 			}
 		}
@@ -269,6 +268,23 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 		}
 	})
 	return nil
+}
+
+// Manual activation remains pending until all available checkers meet the
+// recovery threshold, including on provider retries. It is an explicit manual
+// operation, so it can finish while pool automation is paused.
+func (p probeSummary) permitsDNS(target, pool row) bool {
+	action := str(target["dns_action"])
+	if oneOf(action, "enroll", "enable") {
+		return truth(target["manual_enabled"]) && p.Restore
+	}
+	if !strings.HasPrefix(action, "auto_") {
+		return true
+	}
+	if !truth(pool["automation_enabled"]) || !truth(target["manual_enabled"]) || num(pool["revision"]) != num(target["dns_profile_revision"]) {
+		return false
+	}
+	return action == "auto_remove" && p.Remove || action == "auto_restore" && p.Restore
 }
 func (r *Reconciler) scanPool(poolID string, adopt bool) (int, error) {
 	r.dnsMu.Lock()
