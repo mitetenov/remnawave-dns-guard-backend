@@ -16,7 +16,7 @@ go build ./...
 docker build --platform linux/amd64 -t remnawave-dns-guard-backend:local .
 ```
 
-Оставлены изолированные unit-тесты: парсинг подписок, URL/IP и профилей, версии возможностей агента, Fernet/Unicode golden-векторы, а также provider API с подменённым HTTP transport. Проверки не открывают SQLite и не запускают другие сервисы, контейнеры или бинарные процессы. Python-интеграционные harness, Go-to-Go wire suite, image smoke и тесты реальной БД удалены по принятой политике тестирования.
+Оставлены изолированные unit-тесты: парсинг подписок, URL/IP и профилей, версии возможностей агента, Fernet/Unicode golden-векторы, политика активации узлов после успешных серий всех доступных чекеров и подтверждения DNS, а также provider API с подменённым HTTP transport. Проверки не открывают SQLite и не запускают другие сервисы, контейнеры или бинарные процессы. Python-интеграционные harness, Go-to-Go wire suite, image smoke и тесты реальной БД удалены по принятой политике тестирования.
 
 CI использует Ubuntu 26.04, проверяет tidy/verify/gofmt/vet/golangci-lint v2.15.0, unit/race и production build. Compose проверяется с инертными CI-параметрами; Docker-образ только собирается и проверяется на AMD64. После этих проверок main сохраняет публикацию latest и sha-<полный commit SHA>; PR не публикует. Живые Cloudflare/Remnawave, базы, DNS и узлы в тестах не используются. Runtime SQLite, HTTP API, healthcheck и backup/restore остаются production-функциями.
 
