@@ -244,10 +244,7 @@ func (a *App) pollChecker(data Poll) []row {
 func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 	s, agentID := a.s, str(agent["id"])
 	check := s.one("SELECT * FROM target_checks WHERE target_id=? AND agent_id=?", target["id"], agentID)
-	failures, successes := 0, 0
-	if checkFresh(check, agent, num(pool["interval_seconds"]), now) {
-		failures, successes = int(num(check["failures"])), int(num(check["successes"]))
-	}
+	failures, successes := probeStreak(check, agent, now)
 	reason := ""
 	if result.Error != nil {
 		reason = *result.Error
@@ -270,7 +267,11 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 	} else {
 		s.exec("UPDATE target_checks SET route_results=NULL WHERE target_id=? AND agent_id=?", target["id"], agentID)
 	}
-	summary := s.probeSnapshot().summary(target)
+	checks := map[string]row{}
+	for _, check := range s.all("SELECT * FROM target_checks WHERE target_id=?", target["id"]) {
+		checks[str(check["agent_id"])] = check
+	}
+	summary := summarizeProbes(pool, s.all("SELECT * FROM agents ORDER BY id"), checks, nowSeconds())
 	target = s.cacheProbeTarget(target, summary)
 	manualPending := target["dns_action"] != nil && !strings.HasPrefix(str(target["dns_action"]), "auto_")
 	if truth(pool["automation_enabled"]) && !manualPending {
@@ -291,4 +292,15 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 		message, level = "Probe inconclusive: "+reason, "error"
 	}
 	s.event(level, "check", "Agent "+agentID+": "+message, pool["id"], target["id"])
+}
+
+// A scheduler delay makes old evidence stale for DNS, but does not interrupt
+// consecutive observations from a continuously connected checker. Polls reset
+// histories after control outages or expired leases; route changes reset them
+// explicitly. A newly accepted observation must still pass checkFresh for DNS.
+func probeStreak(check, agent row, now float64) (int, int) {
+	if check == nil || check["outcome"] == nil || !checkerHealthy(agent, now) || !routeEvidenceFresh(check, agent, now) {
+		return 0, 0
+	}
+	return int(num(check["failures"])), int(num(check["successes"]))
 }

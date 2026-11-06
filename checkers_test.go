@@ -86,3 +86,38 @@ func TestCheckerTargetProjection(t *testing.T) {
 		t.Fatal("manual disable lost")
 	}
 }
+
+func TestProbeStreakSurvivesSlowSweepWithoutReusingStaleEvidence(t *testing.T) {
+	pool := row{"interval_seconds": 60, "failure_threshold": 3, "recovery_threshold": 5}
+	now := float64(10000)
+	for _, success := range []bool{true, false} {
+		check := row{"outcome": success, "successes": 5, "failures": 0, "last_checked_at": iso(fromSeconds(now - 250))}
+		if !success {
+			check["successes"], check["failures"] = 0, 3
+		}
+		agent := row{"id": "a", "healthy": true, "last_seen": now}
+		failures, successes := probeStreak(check, agent, now)
+		if failures != int(num(check["failures"])) || successes != int(num(check["successes"])) {
+			t.Fatal("a slow sweep interrupted consecutive observations", failures, successes)
+		}
+		stale := summarizeProbes(pool, []row{agent}, map[string]row{"a": check}, now)
+		if stale.Remove || stale.Restore || stale.Fresh {
+			t.Fatal("historical streak authorized DNS without a fresh observation", stale)
+		}
+		check["last_checked_at"] = iso(fromSeconds(now))
+		fresh := summarizeProbes(pool, []row{agent}, map[string]row{"a": check}, now)
+		if fresh.Restore != success || fresh.Remove == success {
+			t.Fatal("fresh observation failed to authorize the accumulated streak", fresh)
+		}
+		check["outcome"] = nil
+		if f, s := probeStreak(check, agent, now); f != 0 || s != 0 {
+			t.Fatal("inconclusive observation did not interrupt streak")
+		}
+		check["outcome"] = success
+		for _, unhealthy := range []row{{"id": "a", "healthy": false, "last_seen": now}, {"id": "a", "healthy": true, "last_seen": now - 91}} {
+			if f, s := probeStreak(check, unhealthy, now); f != 0 || s != 0 {
+				t.Fatal("disconnected checker retained its streak")
+			}
+		}
+	}
+}

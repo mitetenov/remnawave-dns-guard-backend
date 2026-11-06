@@ -37,6 +37,24 @@ func TestCloudflarePaginationAndExactHostname(t *testing.T) {
 	}
 }
 
+func TestCloudflarePageSizesRespectEndpointLimits(t *testing.T) {
+	for _, test := range []struct{ path, perPage string }{{"/zones", "50"}, {"/zones/zone/dns_records", "100"}} {
+		t.Run(test.path, func(t *testing.T) {
+			pages := []string{}
+			c := &Cloudflare{"token", providerClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				pages = append(pages, req.URL.Query().Get("page"))
+				if req.URL.Query().Get("per_page") != test.perPage {
+					t.Fatalf("per_page=%s, expected %s", req.URL.Query().Get("per_page"), test.perPage)
+				}
+				return response(row{"success": true, "result": []row{}, "result_info": row{"total_pages": 2}}, 200), nil
+			})})}
+			if _, err := c.pages(test.path, nil); err != nil || strings.Join(pages, ",") != "1,2" {
+				t.Fatal(pages, err)
+			}
+		})
+	}
+}
+
 func TestRemnawaveCurrentReadOnlyShapesAndSanitizedErrors(t *testing.T) {
 	client := providerClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method != "GET" || req.Header.Get("Authorization") != "Bearer api-token" {

@@ -16,7 +16,10 @@ func desiredHostDisabled(pool row, targets []row, summaries map[string]probeSumm
 			continue
 		}
 		if truth(target["dns_uncertain"]) || target["dns_action"] != nil {
-			return false, false
+			// Unconfirmed targets prevent declaring a total outage, but must
+			// not veto recovery of a different, confirmed address.
+			allDown = false
+			continue
 		}
 		summary := summaries[str(target["id"])]
 		if !summary.Remove || truth(target["dns_present"]) && target["status"] != "protected" {

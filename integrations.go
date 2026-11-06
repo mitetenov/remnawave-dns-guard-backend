@@ -75,12 +75,16 @@ func (c *Cloudflare) request(method, path string, params url.Values, payload any
 }
 func (c *Cloudflare) pages(path string, params url.Values) ([]row, error) {
 	out := []row{}
+	pageSize := "100"
+	if path == "/zones" {
+		pageSize = "50"
+	}
 	if params == nil {
 		params = url.Values{}
 	}
 	for page := 1; page <= 1000; page++ {
 		params.Set("page", strconv.Itoa(page))
-		params.Set("per_page", "100")
+		params.Set("per_page", pageSize)
 		body, e := c.request(http.MethodGet, path, params, nil)
 		if e != nil {
 			return nil, e

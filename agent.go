@@ -53,6 +53,10 @@ func (a *App) agentRoutes() {
 				jobs = a.pollChecker(data)
 			})
 			response := row{"jobs": jobs, "poll_after_seconds": 10}
+			if len(jobs) > 0 {
+				// Refill completed work immediately; idle polls retain their backoff.
+				response["poll_after_seconds"] = 0
+			}
 			if supportsSOCKS5(data.Version) {
 				response["proxy"] = a.s.checkerProxyConfig(data.AgentID)
 				response["routes"] = routeSelection(a.checker(data.AgentID))
