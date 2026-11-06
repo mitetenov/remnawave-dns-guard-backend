@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-var poolFields = []string{"name", "hostname", "zone_id", "ttl", "interval_seconds", "failure_threshold", "recovery_threshold", "automation_enabled"}
+var poolFields = []string{"name", "hostname", "zone_id", "ttl", "interval_seconds", "failure_threshold", "recovery_threshold", "automation_enabled", "disable_host_when_all_down"}
 
 func (a *App) poolRoutes() {
 	a.managementRoutes()
@@ -25,6 +25,7 @@ func (a *App) poolRoutes() {
 			}
 			id := uid()
 			a.s.exec("INSERT INTO pools (id,name,hostname,zone_id,ttl,interval_seconds,failure_threshold,recovery_threshold,automation_enabled,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)", id, data.Name, data.Hostname, data.ZoneID, data.TTL, data.IntervalSeconds, data.FailureThreshold, data.RecoveryThreshold, 0, iso(time.Now()))
+			a.s.exec("UPDATE pools SET disable_host_when_all_down=? WHERE id=?", data.DisableHostWhenAllDown, id)
 			a.s.exec("UPDATE pools SET dns_next_check=? WHERE id=?", nowSeconds()+dnsCheckSeconds, id)
 			a.s.event("info", "manual", "Pool created", id, nil)
 			return poolView(a.pool(id))
@@ -48,8 +49,9 @@ func (a *App) poolRoutes() {
 				b, _ := json.Marshal(old[key])
 				merged[key] = b
 			}
-			auto, _ := json.Marshal(truth(old["automation_enabled"]))
-			merged["automation_enabled"] = auto
+			for _, key := range []string{"automation_enabled", "disable_host_when_all_down"} {
+				merged[key], _ = json.Marshal(truth(old[key]))
+			}
 			for k, v := range fields {
 				merged[k] = v
 			}
@@ -79,8 +81,10 @@ func (a *App) poolRoutes() {
 				for key, value := range data.values() {
 					a.s.exec("UPDATE pools SET "+key+"=? WHERE id=?", value, id)
 				}
+				a.s.exec("UPDATE pools SET remnawave_next_check=0 WHERE id=?", id)
 				a.s.event("info", "manual", "Pool settings updated", id, nil)
 			})
+			a.reconciler.signal()
 			return poolView(a.pool(id))
 		})
 	})

@@ -65,6 +65,7 @@ func New(c Config, options Options) (*App, error) {
 	a := &App{config: c, s: s, client: providerClient(options.Client), mux: http.NewServeMux(), loginFailures: []float64{}}
 	a.subscriptionClient = newSubscriptionClient()
 	a.reconciler = newReconciler(s, a.dnsProvider)
+	a.reconciler.remnawave = a.remnawaveProvider
 	a.notifier = newNotifier(s, a.client)
 	a.routes()
 	if options.BackgroundTasks {
@@ -248,11 +249,15 @@ func (a *App) target(id string) row {
 func poolView(p row) row {
 	value := row{}
 	for k, v := range p {
-		if !oneOf(k, "profile", "revision", "dns_next_check") {
+		if !oneOf(k, "profile", "revision", "dns_next_check", "remnawave_next_check") {
 			value[k] = v
 		}
 	}
 	value["automation_enabled"], value["profile_configured"] = truth(p["automation_enabled"]), truth(p["profile"])
+	value["disable_host_when_all_down"] = truth(p["disable_host_when_all_down"])
+	if p["remnawave_host_disabled"] != nil {
+		value["remnawave_host_disabled"] = truth(p["remnawave_host_disabled"])
+	}
 	return value
 }
 func (a *App) targetViews(rows []row) []row {
@@ -326,15 +331,20 @@ func (a *App) dnsProvider() (*Cloudflare, error) {
 	return &Cloudflare{token, a.client}, nil
 }
 func (a *App) remnawave() *Remnawave {
+	r, e := a.remnawaveProvider()
+	if e != nil {
+		fail(400, e.Error())
+	}
+	return r
+}
+func (a *App) remnawaveProvider() (*Remnawave, error) {
 	a.s.mu.Lock()
 	defer a.s.mu.Unlock()
 	endpoint, token := a.s.get("remnawave_url"), a.s.get("remnawave_api_token")
 	if endpoint == "" || token == "" {
-		fail(400, "Configure Remnawave first")
+		return nil, integration("Configure Remnawave first")
 	}
-	r, e := newRemnawave(endpoint, token, a.client)
-	mustErr(e)
-	return r
+	return newRemnawave(endpoint, token, a.client)
 }
 func (a *App) manualDNSLocked(id, action string) any {
 	a.s.mu.Lock()

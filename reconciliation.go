@@ -15,6 +15,7 @@ const controlFreshSeconds = 90
 type Reconciler struct {
 	s                *Store
 	provider         func() (*Cloudflare, error)
+	remnawave        func() (*Remnawave, error)
 	dnsMu            sync.Mutex
 	wake, stop, done chan struct{}
 	once             sync.Once
@@ -209,6 +210,7 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 					status = "protected"
 				}
 				s.exec("UPDATE targets SET manual_enabled=?,dns_present=1,dns_uncertain=0,dns_action=NULL,dns_error=NULL,dns_checked_at=?,status=? WHERE id=?", enabled, iso(time.Now()), status, targetID)
+				s.exec("UPDATE pools SET remnawave_next_check=0 WHERE id=?", p["id"])
 				return
 			}
 			if current["dns_error"] != ie.Message {
@@ -231,7 +233,7 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 		if current == nil || current["dns_operation_id"] != operation {
 			return
 		}
-		s.exec("UPDATE pools SET dns_next_check=0 WHERE id=?", p["id"])
+		s.exec("UPDATE pools SET dns_next_check=0,remnawave_next_check=0 WHERE id=?", p["id"])
 		if action == "delete_dns" {
 			s.exec("DELETE FROM targets WHERE id=?", targetID)
 			s.event("warning", "manual", "Target removed; exact A record absence verified", p["id"], targetID)
@@ -420,4 +422,5 @@ func (r *Reconciler) runOnce() {
 		}
 		_, _ = r.scanPool(str(p["id"]), false)
 	}
+	r.syncRemnawaveHosts()
 }
