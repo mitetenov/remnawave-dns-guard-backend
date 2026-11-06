@@ -349,7 +349,82 @@ func (r *Remnawave) hosts() ([]row, error) {
 		if remark == nil {
 			remark = ""
 		}
-		out = append(out, row{"uuid": h["uuid"], "remark": remark, "address": h["address"], "port": int(port), "node_uuids": nodes})
+		if h["isDisabled"] != nil {
+			if _, ok := h["isDisabled"].(bool); !ok {
+				return nil, integration("Remnawave returned an invalid host response")
+			}
+		}
+		out = append(out, row{"uuid": h["uuid"], "remark": remark, "address": h["address"], "port": int(port), "node_uuids": nodes, "is_disabled": h["isDisabled"]})
 	}
 	return out, nil
+}
+
+func (r *Remnawave) setHostDisabled(uuid string, disabled bool) error {
+	body, _ := json.Marshal(row{"uuid": uuid, "isDisabled": disabled})
+	req, e := http.NewRequest(http.MethodPatch, r.url+"/api/hosts", bytes.NewReader(body))
+	if e != nil {
+		return integration("Remnawave API unavailable or request rejected")
+	}
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Content-Type", "application/json")
+	response, e := r.client.Do(req)
+	if e != nil {
+		return integration("Remnawave API unavailable or request rejected")
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return integration("Remnawave API unavailable or request rejected")
+	}
+	return nil
+}
+
+// Only exact pool hostnames are managed. A read after mutations confirms the
+// state, including retries after a lost response or a partially updated host set.
+func (r *Remnawave) ensurePoolHosts(hostname string, disabled bool) error {
+	hosts, e := r.hosts()
+	if e != nil {
+		return e
+	}
+	matched, changed := map[string]bool{}, false
+	for _, host := range hosts {
+		if !strings.EqualFold(strings.TrimRight(str(host["address"]), "."), strings.TrimRight(hostname, ".")) {
+			continue
+		}
+		state, ok := host["is_disabled"].(bool)
+		if !ok {
+			return integration("Remnawave returned a host without a valid disabled state")
+		}
+		matched[str(host["uuid"])] = true
+		if state != disabled {
+			if e = r.setHostDisabled(str(host["uuid"]), disabled); e != nil {
+				return e
+			}
+			changed = true
+		}
+	}
+	if len(matched) == 0 {
+		return integration("No Remnawave hosts match the pool hostname")
+	}
+	if !changed {
+		return nil
+	}
+	hosts, e = r.hosts()
+	if e != nil {
+		return e
+	}
+	for _, host := range hosts {
+		id := str(host["uuid"])
+		if !matched[id] {
+			continue
+		}
+		state, ok := host["is_disabled"].(bool)
+		if !ok || state != disabled || !strings.EqualFold(strings.TrimRight(str(host["address"]), "."), strings.TrimRight(hostname, ".")) {
+			return integration("Remnawave host state could not be confirmed")
+		}
+		delete(matched, id)
+	}
+	if len(matched) != 0 {
+		return integration("Remnawave host state could not be confirmed")
+	}
+	return nil
 }

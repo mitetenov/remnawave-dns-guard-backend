@@ -274,6 +274,10 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 	target = s.cacheProbeTarget(target, summary)
 	manualPending := target["dns_action"] != nil && !strings.HasPrefix(str(target["dns_action"]), "auto_")
 	if truth(pool["automation_enabled"]) && !manualPending {
+		if summary.Restore && truth(target["dns_present"]) && truth(pool["remnawave_host_disabled"]) {
+			s.exec("UPDATE pools SET remnawave_next_check=0 WHERE id=?", pool["id"])
+			a.reconciler.signal()
+		}
 		if summary.Remove && (truth(target["dns_present"]) || truth(target["dns_uncertain"])) && target["status"] != "protected" {
 			a.reconciler.queueLocked(str(target["id"]), "auto_remove")
 		} else if summary.Restore && (!truth(target["dns_present"]) || truth(target["dns_uncertain"])) {

@@ -19,21 +19,22 @@ type Settings struct {
 	RemnawaveAPIToken  *string `json:"remnawave_api_token"`
 }
 type PoolInput struct {
-	Name              string `json:"name"`
-	Hostname          string `json:"hostname"`
-	ZoneID            string `json:"zone_id"`
-	TTL               int    `json:"ttl"`
-	IntervalSeconds   int    `json:"interval_seconds"`
-	FailureThreshold  int    `json:"failure_threshold"`
-	RecoveryThreshold int    `json:"recovery_threshold"`
-	AutomationEnabled bool   `json:"automation_enabled"`
+	Name                   string `json:"name"`
+	Hostname               string `json:"hostname"`
+	ZoneID                 string `json:"zone_id"`
+	TTL                    int    `json:"ttl"`
+	IntervalSeconds        int    `json:"interval_seconds"`
+	FailureThreshold       int    `json:"failure_threshold"`
+	RecoveryThreshold      int    `json:"recovery_threshold"`
+	AutomationEnabled      bool   `json:"automation_enabled"`
+	DisableHostWhenAllDown bool   `json:"disable_host_when_all_down"`
 }
 
 func defaultPool() PoolInput {
 	return PoolInput{TTL: 120, IntervalSeconds: 60, FailureThreshold: 3, RecoveryThreshold: 5}
 }
 func (p PoolInput) values() row {
-	return row{"name": p.Name, "hostname": p.Hostname, "zone_id": p.ZoneID, "ttl": p.TTL, "interval_seconds": p.IntervalSeconds, "failure_threshold": p.FailureThreshold, "recovery_threshold": p.RecoveryThreshold, "automation_enabled": p.AutomationEnabled}
+	return row{"name": p.Name, "hostname": p.Hostname, "zone_id": p.ZoneID, "ttl": p.TTL, "interval_seconds": p.IntervalSeconds, "failure_threshold": p.FailureThreshold, "recovery_threshold": p.RecoveryThreshold, "automation_enabled": p.AutomationEnabled, "disable_host_when_all_down": p.DisableHostWhenAllDown}
 }
 
 type TargetInput struct {

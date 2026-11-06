@@ -28,7 +28,7 @@ CI использует Ubuntu 26.04, проверяет tidy/verify/gofmt/vet/g
 | Backend не запускается | Секреты, `PUBLIC_ORIGIN`, права UID 10001 на `/data`, целостность SQLite и прежний `APP_SECRET` |
 | Login/изменения дают 403 | Точный Origin, secure Cookie через HTTPS, сохранение заголовков proxy |
 | Зоны Cloudflare не видны | `Zone Read` + `DNS Edit`, разрешённая зона |
-| Remnawave 401/403 | HTTPS URL, API token и read scopes, сохранение Authorization |
+| Remnawave 401/403 | HTTPS URL, API token и права чтения/изменения хостов, сохранение Authorization |
 | Агент не виден | Одинаковый токен, HTTPS URL, исходящий доступ, отсутствие браузерной авторизации на `/api/agent/` |
 | Проверки не идут | Здоровая контрольная связь, включённые цели, профиль и время следующего задания |
 | Все цели ошибочны, control здоров | Общий VLESS профиль и доступность `PROBE_URLS` |
