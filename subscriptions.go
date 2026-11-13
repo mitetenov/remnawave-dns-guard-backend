@@ -117,7 +117,8 @@ func subscriptionURIs(body []byte) ([]string, error) {
 	list, seen := []string{}, map[string]bool{}
 	for _, line := range strings.Split(text, "\n") {
 		uri := strings.TrimSpace(line)
-		if !strings.HasPrefix(strings.ToLower(uri), "vless://") || seen[uri] {
+		lower := strings.ToLower(uri)
+		if !(strings.HasPrefix(lower, "vless://") || strings.HasPrefix(lower, "hysteria2://") || strings.HasPrefix(lower, "hy2://")) || seen[uri] {
 			continue
 		}
 		if len(uri) > 16384 || len(list) >= 500 {
@@ -127,7 +128,7 @@ func subscriptionURIs(body []byte) ([]string, error) {
 		list = append(list, uri)
 	}
 	if len(list) == 0 {
-		return nil, errors.New("В подписке нет VLESS-ссылок. Нужен список ссылок в текстовом формате или Base64.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
+		return nil, errors.New("В подписке нет VLESS- или Hysteria2-ссылок. Нужен список ссылок в текстовом формате или Base64.") //nolint:staticcheck // ST1005: preserve localized user-facing API sentence.
 	}
 	placeholders := 0
 	for _, uri := range list {

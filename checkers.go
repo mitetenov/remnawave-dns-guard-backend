@@ -223,7 +223,7 @@ func (a *App) pollChecker(data Poll) []row {
 		}
 		pool := a.pool(str(target["pool_id"]))
 		profile := s.profile(pool)
-		if len(profile.XHTTPExtra) > 0 && !supportsXHTTPExtra(data.Version) || len(profile.ALPN) > 0 && !supportsALPN(data.Version) {
+		if profile.Protocol == "hysteria2" && !supportsHysteria2(data.Version) || len(profile.XHTTPExtra) > 0 && !supportsXHTTPExtra(data.Version) || len(profile.ALPN) > 0 && !supportsALPN(data.Version) {
 			continue
 		}
 		id := uid()
