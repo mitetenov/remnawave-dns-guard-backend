@@ -118,7 +118,7 @@ func subscriptionURIs(body []byte) ([]string, error) {
 	for _, line := range strings.Split(text, "\n") {
 		uri := strings.TrimSpace(line)
 		lower := strings.ToLower(uri)
-		if !(strings.HasPrefix(lower, "vless://") || strings.HasPrefix(lower, "hysteria2://") || strings.HasPrefix(lower, "hy2://")) || seen[uri] {
+		if seen[uri] || !strings.HasPrefix(lower, "vless://") && !strings.HasPrefix(lower, "hysteria2://") && !strings.HasPrefix(lower, "hy2://") {
 			continue
 		}
 		if len(uri) > 16384 || len(list) >= 500 {
