@@ -31,6 +31,13 @@ func supportsXHTTPExtra(version string) bool { return agentVersionAtLeast(versio
 func supportsALPN(version string) bool       { return agentVersionAtLeast(version, 2) }
 func supportsHysteria2(version string) bool  { return agentVersionAtLeast(version, 6) }
 
+func supportsProbeProfile(version string, profile Profile) bool {
+	return (profile.Protocol != "hysteria2" || supportsHysteria2(version)) &&
+		(profile.Congestion == "" || agentVersionAtLeast(version, 7)) &&
+		(len(profile.XHTTPExtra) == 0 || supportsXHTTPExtra(version)) &&
+		(len(profile.ALPN) == 0 || supportsALPN(version))
+}
+
 func (a *App) agentRoutes() {
 	a.checkerProxyRoutes()
 	a.route("GET /api/agents", "ui", func(w http.ResponseWriter, r *http.Request) any {

@@ -48,6 +48,7 @@ type Profile struct {
 	Obfs         string          `json:"obfs,omitempty"`
 	ObfsPassword string          `json:"obfs_password,omitempty"`
 	PinSHA256    string          `json:"pin_sha256,omitempty"`
+	Congestion   string          `json:"hysteria_congestion,omitempty"`
 	Port         int             `json:"port"`
 	UUID         string          `json:"uuid"`
 	Transport    string          `json:"transport"`
@@ -159,6 +160,9 @@ func validateProfile(p *Profile) {
 	}
 	if !validXHTTPExtra(p.XHTTPExtra, p.Transport, p.XHTTPMode) {
 		invalid("xhttp_extra")
+	}
+	if p.Congestion != "" && (p.Protocol != "hysteria2" || !oneOf(p.Congestion, "bbr", "reno", "brutal")) {
+		invalid("hysteria_congestion")
 	}
 	if p.Port < 1 || p.Port > 65535 {
 		invalid("port")

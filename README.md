@@ -32,6 +32,9 @@ Salamander и SHA-256 сертификата. Порт по умолчанию �
 сертификата используйте `pinSHA256` — закреплённый Xray не поддерживает
 `insecure=1` без SHA-256. Port hopping, Gecko и ECH пока не поддерживаются.
 
+Для алгоритма QUIC из `fm.quicParams.congestion` (`bbr`, `reno` или `brutal`)
+нужен агент **1.7.0+**. Задания без явного алгоритма по-прежнему доступны агентам 1.6.0.
+
 ## Что потребуется
 
 - Linux-сервер панели с Docker Engine и Compose v2, существующий HTTPS reverse proxy и отдельный домен, например `guard.example.com`.
