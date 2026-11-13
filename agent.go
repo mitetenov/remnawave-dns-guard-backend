@@ -29,6 +29,7 @@ func agentVersionAtLeast(version string, minor int) bool {
 
 func supportsXHTTPExtra(version string) bool { return agentVersionAtLeast(version, 1) }
 func supportsALPN(version string) bool       { return agentVersionAtLeast(version, 2) }
+func supportsHysteria2(version string) bool  { return agentVersionAtLeast(version, 6) }
 
 func (a *App) agentRoutes() {
 	a.checkerProxyRoutes()

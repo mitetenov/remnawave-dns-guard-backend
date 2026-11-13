@@ -90,7 +90,10 @@ func (a *App) poolRoutes() {
 	})
 	a.route("PUT /api/pools/{id}/profile", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		data := defaultProfile()
-		bodyObject(w, r, &data, []string{"port", "uuid", "transport", "security", "server_name"})
+		fields := bodyObject(w, r, &data, []string{"port", "transport", "security", "server_name"})
+		if data.Protocol != "hysteria2" && fields["uuid"] == nil {
+			invalid("uuid")
+		}
 		validateProfile(&data)
 		a.reconciler.dnsMu.Lock()
 		defer a.reconciler.dnsMu.Unlock()

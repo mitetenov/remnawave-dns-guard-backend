@@ -43,20 +43,25 @@ type TargetInput struct {
 	RemnawaveUUID *string `json:"remnawave_uuid"`
 }
 type Profile struct {
-	Port        int             `json:"port"`
-	UUID        string          `json:"uuid"`
-	Transport   string          `json:"transport"`
-	Security    string          `json:"security"`
-	ServerName  string          `json:"server_name"`
-	PublicKey   string          `json:"public_key"`
-	ShortID     string          `json:"short_id"`
-	Flow        string          `json:"flow"`
-	Fingerprint string          `json:"fingerprint"`
-	Path        string          `json:"path"`
-	Host        string          `json:"host"`
-	XHTTPMode   string          `json:"xhttp_mode"`
-	XHTTPExtra  json.RawMessage `json:"xhttp_extra,omitempty"`
-	ALPN        []string        `json:"alpn,omitempty"`
+	Protocol     string          `json:"protocol,omitempty"`
+	Password     string          `json:"password,omitempty"`
+	Obfs         string          `json:"obfs,omitempty"`
+	ObfsPassword string          `json:"obfs_password,omitempty"`
+	PinSHA256    string          `json:"pin_sha256,omitempty"`
+	Port         int             `json:"port"`
+	UUID         string          `json:"uuid"`
+	Transport    string          `json:"transport"`
+	Security     string          `json:"security"`
+	ServerName   string          `json:"server_name"`
+	PublicKey    string          `json:"public_key"`
+	ShortID      string          `json:"short_id"`
+	Flow         string          `json:"flow"`
+	Fingerprint  string          `json:"fingerprint"`
+	Path         string          `json:"path"`
+	Host         string          `json:"host"`
+	XHTTPMode    string          `json:"xhttp_mode"`
+	XHTTPExtra   json.RawMessage `json:"xhttp_extra,omitempty"`
+	ALPN         []string        `json:"alpn,omitempty"`
 }
 
 func defaultProfile() Profile { return Profile{Fingerprint: "chrome", Path: "/", XHTTPMode: "auto"} }
@@ -158,6 +163,18 @@ func validateProfile(p *Profile) {
 	if p.Port < 1 || p.Port > 65535 {
 		invalid("port")
 	}
+	if p.Protocol == "hysteria2" {
+		validateHysteriaProfile(*p)
+		return
+	}
+	if !oneOf(p.Protocol, "", "vless") {
+		invalid("protocol")
+	}
+	if p.Password != "" || p.Obfs != "" || p.ObfsPassword != "" || p.PinSHA256 != "" {
+		invalid("protocol")
+	}
+	// Keep VLESS profiles readable by agents with strict legacy decoders.
+	p.Protocol = ""
 	id, ok := canonicalUUID(p.UUID)
 	if !ok {
 		invalid("uuid")
@@ -197,6 +214,31 @@ func validateProfile(p *Profile) {
 		if r < 32 || r == 127 {
 			invalid("request")
 		}
+	}
+}
+
+func validateHysteriaProfile(p Profile) {
+	if p.Transport != "udp" || p.Security != "tls" || !validHost(p.ServerName) {
+		invalid("request")
+	}
+	if !textLength(p.Password, 0, 2048) || !textLength(p.ObfsPassword, 0, 2048) || !oneOf(p.Obfs, "", "salamander") || (p.Obfs == "salamander") != (p.ObfsPassword != "") {
+		invalid("password")
+	}
+	for _, r := range p.Password + p.ObfsPassword {
+		if r < 32 || r == 127 {
+			invalid("password")
+		}
+	}
+	if p.PinSHA256 != "" {
+		if hash, err := hex.DecodeString(p.PinSHA256); err != nil || len(hash) != 32 {
+			invalid("pin_sha256")
+		}
+	}
+	if len(p.ALPN) > 0 && (len(p.ALPN) != 1 || p.ALPN[0] != "h3") {
+		invalid("alpn")
+	}
+	if p.UUID != "" || p.PublicKey != "" || p.ShortID != "" || p.Flow != "" || p.Host != "" || !oneOf(p.Fingerprint, "", "chrome") || !oneOf(p.Path, "", "/") || !oneOf(p.XHTTPMode, "", "auto") {
+		invalid("request")
 	}
 }
 
