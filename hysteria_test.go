@@ -26,6 +26,7 @@ func TestHysteriaValidation(t *testing.T) {
 		"unknown obfs":          func(p *Profile) { p.Obfs = "gecko" },
 		"missing obfs password": func(p *Profile) { p.ObfsPassword = "" },
 		"invalid pin":           func(p *Profile) { p.PinSHA256 = "ab" },
+		"invalid congestion":    func(p *Profile) { p.Congestion = "force-brutal" },
 		"wrong ALPN":            func(p *Profile) { p.ALPN = []string{"h2"} },
 		"VLESS UUID":            func(p *Profile) { p.UUID = "550e8400-e29b-41d4-a716-446655440000" },
 		"XHTTP extra":           func(p *Profile) { p.XHTTPExtra = json.RawMessage(`{}`) },
@@ -72,6 +73,22 @@ func TestHysteriaWireProfileAndAgentCompatibility(t *testing.T) {
 		if bytes.Contains(legacyRaw, []byte(`"`+field+`"`)) {
 			t.Fatal("legacy strict decoder would reject field", field)
 		}
+	}
+}
+
+func TestHysteriaCongestionAgentCompatibility(t *testing.T) {
+	p := hysteriaProfile()
+	if !supportsProbeProfile("1.6.0", p) {
+		t.Fatal("Hysteria2 without custom congestion must still work on 1.6.0")
+	}
+	p.Congestion = "bbr"
+	validateProfile(&p)
+	if supportsProbeProfile("1.6.0", p) || !supportsProbeProfile("1.7.0", p) {
+		t.Fatal("custom Hysteria2 congestion requires agent 1.7.0 or newer")
+	}
+	raw, err := json.Marshal(p)
+	if err != nil || !bytes.Contains(raw, []byte(`"hysteria_congestion":"bbr"`)) {
+		t.Fatal("custom congestion was lost from the job profile", err)
 	}
 }
 
