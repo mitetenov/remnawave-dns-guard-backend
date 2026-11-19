@@ -7,15 +7,23 @@ import (
 )
 
 func TestOrderQuoteTracksZonePriceAndConfiguration(t *testing.T) {
-	plan := orderCloudPlan{Code: "starter", CPU: 2, MemoryMB: 2048, StorageGB: 30, StorageTier: "standard", Price: 0.01, Currency: "EUR"}
+	plan := orderCloudPlan{Code: "STARTER-2xCPU-2GB", Family: "starter", CPU: 2, MemoryMB: 2048, StorageGB: 30, StorageTier: "standard", Price: 0.01, Currency: "EUR"}
 	original := orderPlanChoice("fi-hel1", plan)
-	for _, value := range []string{"starter", "2 vCPU", "2048", "30", "0.01 EUR/ч"} {
+	if original.Family != "starter" {
+		t.Errorf("wrong Starter family %q", original.Family)
+	}
+	for _, value := range []string{plan.Code, "2 vCPU", "2048", "30", "6.72 EUR/мес.", "0.01 EUR/ч"} {
 		if !strings.Contains(original.Label, value) {
 			t.Errorf("missing %q in %q", value, original.Label)
 		}
 	}
 	if orderPlanChoice("fi-hel2", plan).ID == original.ID {
 		t.Error("zone was not bound to quote")
+	}
+	withoutFamily := plan
+	withoutFamily.Family = ""
+	if orderPlanChoice("fi-hel1", withoutFamily).ID != original.ID {
+		t.Error("catalog family should not change an existing quote")
 	}
 	for _, change := range []func(*orderCloudPlan){
 		func(p *orderCloudPlan) { p.Price = 0.02 }, func(p *orderCloudPlan) { p.Currency = "USD" }, func(p *orderCloudPlan) { p.MemoryMB = 4096 },
@@ -26,6 +34,18 @@ func TestOrderQuoteTracksZonePriceAndConfiguration(t *testing.T) {
 		if orderPlanChoice("fi-hel1", changed).ID == original.ID {
 			t.Error("material plan change kept the quoted ID")
 		}
+	}
+}
+
+func TestOrderPlanFamilyAndMonthlyPrice(t *testing.T) {
+	plan := orderCloudPlan{Code: "PREMIUM-1xCPU-1GB", Family: "premium", Price: 0.0074404762, Currency: "USD"}
+	choice := orderPlanChoice("fi-hel1", plan)
+	if choice.Family != "premium" || !strings.Contains(choice.Label, "5.00 USD/мес.") {
+		t.Errorf("unexpected Premium choice %+v", choice)
+	}
+	plan.Code, plan.Family = "1xCPU-1GB", "general_purpose"
+	if choice := orderPlanChoice("fi-hel1", plan); choice.Family != "" {
+		t.Errorf("legacy plan assigned to %q", choice.Family)
 	}
 }
 

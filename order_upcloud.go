@@ -109,6 +109,7 @@ func (c *upCloudOrder) Countries(ctx context.Context) ([]orderCloudCountry, erro
 
 type orderCloudPlan struct {
 	Code        string  `json:"code"`
+	Family      string  `json:"-"` // Catalog metadata, excluded from order snapshots and quotes.
 	CPU         int     `json:"cpu"`
 	MemoryMB    int     `json:"memory_mb"`
 	StorageGB   int     `json:"storage_gb"`
@@ -135,6 +136,7 @@ func (c *upCloudOrder) zonePlans(ctx context.Context, zone string) ([]orderCloud
 		Plans struct {
 			Items []struct {
 				Name      string      `json:"name"`
+				Family    string      `json:"family"`
 				Cores     json.Number `json:"core_number"`
 				Memory    json.Number `json:"memory_amount"`
 				Size      json.Number `json:"storage_size"`
@@ -168,7 +170,7 @@ func (c *upCloudOrder) zonePlans(ctx context.Context, zone string) ([]orderCloud
 			continue
 		}
 		plans = append(plans, orderCloudPlan{
-			Code: plan.Name, CPU: int(cores), MemoryMB: int(memory), StorageGB: int(size),
+			Code: plan.Name, Family: plan.Family, CPU: int(cores), MemoryMB: int(memory), StorageGB: int(size),
 			StorageTier: plan.Tier, Price: price, Currency: currency,
 		})
 	}
