@@ -58,13 +58,19 @@ func (a *App) replacementRoutes() {
 		if readyErr != nil {
 			message = readyErr.Error()
 		}
+		orderErr := a.orders.installer.checkOrderConfiguration(r.Context())
+		orderMessage := ""
+		if orderErr != nil {
+			orderMessage = orderErr.Error()
+		}
 		return a.withStore(func() any {
 			targets := a.s.all(`SELECT t.id,t.name,t.ip,p.name AS pool_name,p.automation_enabled AS pool_enabled,
- t.manual_enabled,COALESCE(b.node_uuid,t.remnawave_uuid) AS remnawave_uuid,b.provider,b.server_uuid,b.enabled,b.blocked_since
+ t.manual_enabled,COALESCE(b.node_uuid,t.remnawave_uuid) AS remnawave_uuid,b.provider,b.server_uuid,b.enabled,b.blocked_since,
+ EXISTS(SELECT 1 FROM server_orders o WHERE o.target_id=t.id AND o.node_uuid=b.node_uuid) AS order_managed
  FROM targets t JOIN pools p ON p.id=t.pool_id LEFT JOIN replacement_bindings b ON b.target_id=t.id
  ORDER BY p.name,t.name,t.id`)
 			for _, t := range targets {
-				for _, key := range []string{"enabled", "pool_enabled", "manual_enabled"} {
+				for _, key := range []string{"enabled", "pool_enabled", "manual_enabled", "order_managed"} {
 					t[key] = truth(t[key])
 				}
 				if t["blocked_since"] != nil {
@@ -82,7 +88,10 @@ func (a *App) replacementRoutes() {
 					delete(job, "release_after")
 				}
 			}
-			return row{"upcloud_configured": a.s.get("upcloud_token") != "", "ansible_ready": readyErr == nil, "ansible_error": message, "targets": targets, "jobs": jobs}
+			return row{
+				"upcloud_configured": a.s.get("upcloud_token") != "", "ansible_ready": readyErr == nil, "ansible_error": message,
+				"order_ansible_ready": orderErr == nil, "order_ansible_error": orderMessage, "targets": targets, "jobs": jobs,
+			}
 		})
 	})
 	a.route("POST /api/replacements/jobs/{id}/retry-create", "ui", func(w http.ResponseWriter, r *http.Request) any {

@@ -10,7 +10,7 @@
 [RU-агент](https://github.com/mitetenov/remnawave-dns-guard-agent) находятся в отдельных репозиториях.
 Для запуска используются готовые образы Docker Hub. На сервере достаточно `docker-compose.yaml` и `.env`; клонировать репозитории и устанавливать Go/Node.js не требуется.
 
-В разделе **Серверы** можно заказать ноду UpCloud на Debian 13, выбрать локацию, тариф, DNS-пул, тип и профиль Remnawave. В разделе **Автозамена** можно включить замену заблокированных серверов для каждого узла. [Инструкция по настройке](docs/replacements.md).
+В разделе **Серверы** можно заказать ноду UpCloud на Debian 13, выбрать локацию, тариф, DNS-пул, тип и профиль Remnawave. Образ backend содержит плейбуки Ansible для заказов. В разделе **Автозамена** можно включить замену заблокированных серверов для каждого узла. [Настройка заказов и автозамены](docs/replacements.md).
 
 ## Агенты и маршруты проверок
 
@@ -196,7 +196,7 @@ Compose ограничивает CPU, память, число процессо�
 
 ## Разработка и сборка
 
-Нужен Go 1.27.3. Бэкенд — один статически собранный бинарный файл без Python, libc и shell в runtime. SQLite-драйвер `modernc.org/sqlite` закреплён в `go.mod`/`go.sum`.
+Нужен Go 1.27.3. Бэкенд собирается в один статический бинарный файл. Docker-образ включает Ansible и OpenSSH для замены узлов UpCloud. SQLite-драйвер `modernc.org/sqlite` закреплён в `go.mod`/`go.sum`.
 
 ```sh
 go test -race ./...
@@ -211,23 +211,25 @@ go build -o dns-guard-backend ./cmd/dns-guard
 
 ## Сборка и CI
 
-Локальная сборка из корня этого репозитория:
+Для локальной сборки нужен доступ на чтение закрытого репозитория `mitetenov/ansible`. Например, из корня этого репозитория с уже авторизованным `gh`:
 
 ```sh
-docker build --platform linux/amd64 -t remnawave-dns-guard-backend:local .
+ANSIBLE_REPO_TOKEN="$(gh auth token)" docker buildx build --load --platform linux/amd64 \
+  --secret id=ansible_repo_token,env=ANSIBLE_REPO_TOKEN -t remnawave-dns-guard-backend:local .
 ```
 
-Dockerfile сначала копирует `go.mod`/`go.sum` и загружает зависимости, затем — только production-код. Изменения тестов и документации не сбрасывают кеш сборки. BuildKit сохраняет кеш компилятора Go между сборками на одном builder; зависимости также остаются обычным слоем, доступным для CI-кеша `type=gha,mode=max`. Cache mounts сами по себе в GitHub layer cache не экспортируются. В scratch стабильные CA/каталоги и часто меняющийся бинарник разделены независимыми `COPY --link` слоями.
+Dockerfile сначала копирует `go.mod`/`go.sum` и загружает зависимости, затем — только production-код. Изменения тестов и документации не сбрасывают кеш сборки. BuildKit сохраняет кеш компилятора Go между сборками на одном builder; зависимости также остаются обычным слоем, доступным для CI-кеша `type=gha,mode=max`. Cache mounts сами по себе в GitHub layer cache не экспортируются. Пакеты Alpine, каталоги и бинарник разделены по слоям.
 
-Каждый push и pull request запускает изолированные Go unit-тесты с race detector, проверку модулей/форматирования/vet/lint, Compose и production Docker build. Тесты реальной SQLite, отдельно запущенных сервисов и контейнеров удалены.
+Каждый push и pull request запускает изолированные Go unit-тесты с race detector, проверку модулей/форматирования/vet/lint и Compose. Защищённая сборка Docker проверяет синтаксис обоих плейбуков и пропускается для pull request из форков и от Dependabot.
 После всех проверок `main` публикует AMD64-образ
 `mitetenov/remnawave-dns-guard-backend` с тегами `latest` и `sha-<полный commit SHA>`.
 Pull request не публикует образы; deploy автоматически не выполняется.
 
 Repository variables: `DOCKERHUB_USERNAME`, `DOCKERHUB_IMAGE`.
-Repository secret: `DOCKERHUB_TOKEN` с правами Read & Write.
+Для GitHub Actions нужны `DOCKERHUB_TOKEN` с правами Read & Write и `ANSIBLE_REPO_TOKEN` с правом `Contents: Read-only` на `mitetenov/ansible`. BuildKit получает токен Ansible как секрет на время загрузки файлов. Ревизия источника задана `ANSIBLE_REVISION` в `Dockerfile`.
 В `docker-compose.yaml` указаны готовые образы backend и frontend с тегом `latest`.
 Для обновления выполните `docker compose pull` и `docker compose up -d`.
+Если настроены заказы серверов или автозамена, сохраните `COMPOSE_FILE=docker-compose.yaml:docker-compose.replacements.yaml` в `.env`, чтобы обновление подключило каталог `replacement` с ключом и настройками Ansible. [Подключение Ansible](docs/replacements.md)
 Для отката замените тег непосредственно в нужном `image:` на `sha-<полный commit SHA>`.
 Теги бэкенда и UI относятся к независимым commit SHA.
 

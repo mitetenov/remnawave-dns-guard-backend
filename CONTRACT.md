@@ -83,7 +83,7 @@ Hosts are selected by exact `address`/pool hostname equality, ignoring case and 
 
 ### Server replacement and orders
 
-- `GET /api/replacements` returns replacement readiness, bindings and job history. `PUT /api/replacements/settings` accepts the UpCloud API token. `PUT /api/replacements/targets/{id}` accepts `{provider:"upcloud",server_uuid,remnawave_uuid,enabled}`.
+- `GET /api/replacements` returns replacement readiness, bindings and job history. `ansible_ready` and `ansible_error` describe manually linked nodes. `order_ansible_ready` and `order_ansible_error` describe orders and their replacements. Bindings with `order_managed: true` use the order installer. `PUT /api/replacements/settings` accepts the UpCloud API token. `PUT /api/replacements/targets/{id}` accepts `{provider:"upcloud",server_uuid,remnawave_uuid,enabled}`.
 - `GET /api/server-orders` returns order history, stage labels and per-pool domain templates. `PUT /api/server-orders/pools/{id}` accepts `{domain_template}`. An empty template disables ordering from that pool.
 - `GET /api/server-orders/options?kind=zone|plan|pool|group|profile` returns `{choices:[{id,label}]}`. Plan choices require the selected `zone`. Their labels show the hourly quote and the estimated monthly price at UpCloud's 672-hour cap in the account currency. Starter and Premium choices also include `family` (`starter` or `premium`). Profile choices can be filtered by `pool_id` to the existing profiles used by its Remnawave hosts.
 - `POST /api/server-orders` accepts `{request_id,zone,plan,pool_id,group,profile_id}`. The idempotent request UUID returns the same order for an identical selection. Orders provision public Debian 13 servers in UpCloud.

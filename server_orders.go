@@ -29,6 +29,7 @@ type orderSelection struct {
 }
 
 type orderInstaller interface {
+	checkOrderConfiguration(context.Context) error
 	ReadyForOrder(orderAnsibleNode) error
 	RunOrder(context.Context, string, string, orderAnsibleNode) error
 	loginPublicKey(context.Context) (string, error)
@@ -75,7 +76,7 @@ func (s *Store) initializeOrders() {
 
 func newOrderManager(a *App) *orderManager {
 	ctx, cancel := context.WithCancel(context.Background())
-	installer := newReplacementAnsible()
+	installer := newOrderAnsible()
 	return &orderManager{a: a, ctx: ctx, cancel: cancel, installer: installer, sshUser: installer.sshUser,
 		cloud: func() (orderCloudProvider, error) {
 			s := a.s
@@ -262,6 +263,9 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 	})
 	if prev != nil {
 		return matchOrderRequest(prev, sel)
+	}
+	if err := m.installer.checkOrderConfiguration(ctx); err != nil {
+		return "", err
 	}
 	plan, err := m.selectedPlan(ctx, sel.Zone, sel.Plan)
 	if err != nil {
