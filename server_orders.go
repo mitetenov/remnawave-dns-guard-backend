@@ -15,8 +15,9 @@ import (
 )
 
 type orderChoice struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
+	ID     string `json:"id"`
+	Label  string `json:"label"`
+	Family string `json:"family,omitempty"`
 }
 
 type orderSelection struct {
@@ -125,9 +126,19 @@ func renderOrderDomain(pattern, country, pool string, serial int) (string, error
 }
 
 func orderPlanChoice(zone string, p orderCloudPlan) orderChoice {
+	const monthlyBillableHours = 24 * 28
+
 	data, _ := json.Marshal(p)
 	id := p.Code + "@" + digest(zone + " " + string(data))[:16]
-	return orderChoice{id, fmt.Sprintf("%s · %d vCPU · %d МиБ RAM · %d ГиБ %s · %.10g %s/ч", p.Code, p.CPU, p.MemoryMB, p.StorageGB, p.StorageTier, p.Price, p.Currency)}
+	family := p.Family
+	if !oneOf(family, "starter", "premium") {
+		family = ""
+	}
+	return orderChoice{
+		ID: id, Family: family,
+		Label: fmt.Sprintf("≈ %.2f %s/мес. · %s · %d vCPU · %d МиБ RAM · %d ГиБ %s · %.10g %s/ч",
+			p.Price*monthlyBillableHours, p.Currency, p.Code, p.CPU, p.MemoryMB, p.StorageGB, p.StorageTier, p.Price, p.Currency),
+	}
 }
 
 func (m *orderManager) options(ctx context.Context, kind, zone, poolID string) ([]orderChoice, error) {
@@ -156,12 +167,12 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID string) (
 			}
 			for _, c := range countries {
 				for _, z := range c.Zones {
-					choices = append(choices, orderChoice{z, c.Name + " · " + z})
+					choices = append(choices, orderChoice{ID: z, Label: c.Name + " · " + z})
 				}
 			}
 		}
 	case "group":
-		choices = []orderChoice{{"nodes", "Обычная нода (nodes)"}, {"nodes_wl", "Нода за CDN (nodes_wl)"}}
+		choices = []orderChoice{{ID: "nodes", Label: "Обычная нода (nodes)"}, {ID: "nodes_wl", Label: "Нода за CDN (nodes_wl)"}}
 	case "profile":
 		r, err := m.a.remnawaveProvider()
 		if err != nil {
@@ -192,14 +203,14 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID string) (
 		}
 		for _, p := range profiles {
 			if slices.ContainsFunc(p.Inbounds, func(in orderPanelInboundChoice) bool { return eligible == nil || eligible[in.ID] }) {
-				choices = append(choices, orderChoice{p.ID, p.Name})
+				choices = append(choices, orderChoice{ID: p.ID, Label: p.Name})
 			}
 		}
 	case "pool":
 		m.a.withStore(func() any {
 			for _, p := range m.a.s.all(`SELECT p.* FROM pools p JOIN server_order_templates t ON t.pool_id=p.id
  WHERE p.profile IS NOT NULL AND t.domain_template!='' ORDER BY p.name,p.hostname`) {
-				choices = append(choices, orderChoice{str(p["id"]), str(p["name"]) + " · " + str(p["hostname"])})
+				choices = append(choices, orderChoice{ID: str(p["id"]), Label: str(p["name"]) + " · " + str(p["hostname"])})
 			}
 			return nil
 		})

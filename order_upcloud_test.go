@@ -52,7 +52,7 @@ func exampleUpCloudOrder() orderCloudRequest {
 	binary.BigEndian.PutUint32(key[15:19], 32)
 	return orderCloudRequest{
 		OperationID: testOrderID, Country: "DE", Zone: "de-fra1", Hostname: "de-vless-01", Title: "Germany VLESS 01",
-		Plan: "2xCPU-4GB", SSHUser: "deploy",
+		Plan: "PREMIUM-2xCPU-4GB", SSHUser: "deploy",
 		SSHKey:    "ssh-ed25519 " + base64.StdEncoding.EncodeToString(key[:]) + " local-comment",
 		EnrollURL: testOrderURL, EnrollToken: testOrderToken,
 	}
@@ -81,7 +81,7 @@ func (f *testOrderUpCloud) request(req *http.Request) (*http.Response, error) {
 			available = "no"
 		}
 		return response(row{"plans": row{"plan": []row{
-			{"name": "2xCPU-4GB", "core_number": 2, "memory_amount": 4096, "current_offering": available, "storage_size": 50, "storage_tier": "maxiops"},
+			{"name": "PREMIUM-2xCPU-4GB", "family": "premium", "core_number": 2, "memory_amount": 4096, "current_offering": available, "storage_size": 50, "storage_tier": "maxiops"},
 			{"name": "16xCPU-32GB", "core_number": 16, "memory_amount": 32768, "current_offering": "yes", "storage_size": 200, "storage_tier": "maxiops"},
 		}}}, 200), nil
 	case "GET /price":
@@ -89,8 +89,8 @@ func (f *testOrderUpCloud) request(req *http.Request) (*http.Response, error) {
 			f.t.Fatalf("expected the selected price-list zone, got %s", req.URL)
 		}
 		return response(row{"prices": row{"zone": []row{
-			{"name": "de-fra2", "server_plan_2xCPU-4GB": row{"amount": 1, "price": 50}, "server_plan_16xCPU-32GB": row{"amount": 1, "price": 60}},
-			{"name": "de-fra1", "server_plan_2xCPU-4GB": row{"amount": 1, "price": f.planPrice}},
+			{"name": "de-fra2", "server_plan_PREMIUM-2xCPU-4GB": row{"amount": 1, "price": 50}, "server_plan_16xCPU-32GB": row{"amount": 1, "price": 60}},
+			{"name": "de-fra1", "server_plan_PREMIUM-2xCPU-4GB": row{"amount": 1, "price": f.planPrice}},
 		}}}, 200), nil
 	case "GET /account":
 		return response(row{"account": row{"currency": "EUR"}}, 200), nil
@@ -131,7 +131,7 @@ func (f *testOrderUpCloud) request(req *http.Request) (*http.Response, error) {
 			f.t.Fatal(err)
 		}
 		proposal := body.Server
-		if proposal.Zone != "de-fra1" || proposal.Plan != "2xCPU-4GB" || proposal.Metadata != "yes" ||
+		if proposal.Zone != "de-fra1" || proposal.Plan != "PREMIUM-2xCPU-4GB" || proposal.Metadata != "yes" ||
 			proposal.SimpleBackup != "no" ||
 			proposal.Hostname != "de-vless-01" || proposal.Title != "Germany VLESS 01" ||
 			!slices.Contains(proposal.Labels.Items, upCloudLabel{upCloudOrderLabel, testOrderID}) ||
@@ -204,7 +204,7 @@ func TestUpCloudOrderPreparationUsesLivePublicCountriesAndPlan(t *testing.T) {
 		t.Fatalf("unexpected public country choices %+v (%v)", countries, err)
 	}
 	plans, err := upcloud.Plans(ctx, "de-fra1")
-	wantPlan := orderCloudPlan{Code: "2xCPU-4GB", CPU: 2, MemoryMB: 4096, StorageGB: 50, StorageTier: "maxiops", Price: 0.035, Currency: "EUR"}
+	wantPlan := orderCloudPlan{Code: "PREMIUM-2xCPU-4GB", Family: "premium", CPU: 2, MemoryMB: 4096, StorageGB: 50, StorageTier: "maxiops", Price: 0.035, Currency: "EUR"}
 	if err != nil || !slices.Equal(plans, []orderCloudPlan{wantPlan}) {
 		t.Fatalf("unexpected tariff catalog %+v (%v)", plans, err)
 	}
@@ -218,7 +218,9 @@ func TestUpCloudOrderPreparationUsesLivePublicCountriesAndPlan(t *testing.T) {
 	if err := json.Unmarshal(snapshot, &prepared); err != nil {
 		t.Fatal(err)
 	}
-	if prepared.Plan != wantPlan || prepared.TemplateID != testOrderTemplate || prepared.SSHKey != strings.TrimSuffix(exampleUpCloudOrder().SSHKey, " local-comment") {
+	snapshotPlan := wantPlan
+	snapshotPlan.Family = ""
+	if prepared.Plan != snapshotPlan || prepared.TemplateID != testOrderTemplate || prepared.SSHKey != strings.TrimSuffix(exampleUpCloudOrder().SSHKey, " local-comment") {
 		t.Fatal("prepared order did not preserve exactly the plan's included size and the login key")
 	}
 	var config struct {
