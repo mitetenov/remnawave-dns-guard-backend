@@ -61,6 +61,7 @@ jobs:
           DATABASE_PATH=/data/guard.db
           EOF
           docker compose config --quiet
+          docker compose -f docker-compose.yaml -f docker-compose.replacements.yaml config --quiet
 
   image-check:
     timeout-minutes: 15

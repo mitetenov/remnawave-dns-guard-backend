@@ -1,0 +1,15 @@
+services:
+  backend:
+    volumes:
+      - type: bind
+        source: ./replacement
+        target: /run/dns-guard/replacement
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      REPLACEMENT_ANSIBLE_REPO_DIR: ${REPLACEMENT_ANSIBLE_REPO_DIR:-/run/dns-guard/replacement/ansible}
+      REPLACEMENT_ANSIBLE_NODE_VARS_DIR: ${REPLACEMENT_ANSIBLE_NODE_VARS_DIR:-/run/dns-guard/replacement/node_vars}
+      REPLACEMENT_ANSIBLE_SSH_USER: ${REPLACEMENT_ANSIBLE_SSH_USER:-root}
+      REPLACEMENT_ANSIBLE_SSH_KEY: ${REPLACEMENT_ANSIBLE_SSH_KEY:-/run/dns-guard/replacement/ssh_key}
+      REPLACEMENT_ANSIBLE_KNOWN_HOSTS: ${REPLACEMENT_ANSIBLE_KNOWN_HOSTS:-/run/dns-guard/replacement/known_hosts}

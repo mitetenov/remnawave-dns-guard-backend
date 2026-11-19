@@ -16,8 +16,10 @@ RUN --mount=type=cache,id=guard-backend-go-build,target=/root/.cache/go-build \
     && chmod 700 /out/data \
     && chmod 1777 /out/tmp
 
-FROM scratch
-COPY --link --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+FROM alpine:3.24
+RUN apk add --no-cache ansible-core ca-certificates openssh-client-default openssh-keygen \
+    && addgroup -S -g 10001 guard \
+    && adduser -S -D -H -u 10001 -G guard guard
 COPY --link --from=build --chown=10001:10001 --chmod=0700 /out/data /data
 COPY --link --from=build --chmod=1777 /out/tmp /tmp
 # The binary changes most often; stable runtime files remain independent layers.

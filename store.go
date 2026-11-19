@@ -204,6 +204,8 @@ func (s *Store) initialize(c Config) (err error) {
 		}
 	}
 	s.initializeCheckers()
+	s.initializeReplacements()
+	s.initializeOrders()
 	revision := authRevision(c)
 	previous := s.one("SELECT value FROM settings WHERE key='auth_revision'")
 	if previous == nil || !constantEqual(str(previous["value"]), revision) {

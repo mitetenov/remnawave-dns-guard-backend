@@ -46,6 +46,8 @@ type App struct {
 	s                  *Store
 	reconciler         *Reconciler
 	notifier           *Notifier
+	replacements       *replacementWorker
+	orders             *orderManager
 	client             *http.Client
 	subscriptionClient *http.Client
 	mux                *http.ServeMux
@@ -67,10 +69,14 @@ func New(c Config, options Options) (*App, error) {
 	a.reconciler = newReconciler(s, a.dnsProvider)
 	a.reconciler.remnawave = a.remnawaveProvider
 	a.notifier = newNotifier(s, a.client)
+	a.replacements = newReplacementWorker(a)
+	a.orders = newOrderManager(a)
 	a.routes()
 	if options.BackgroundTasks {
 		a.reconciler.start()
 		a.notifier.start()
+		a.replacements.start()
+		a.orders.start()
 	}
 	return a, nil
 }
@@ -99,6 +105,8 @@ func (a *App) Handler() http.Handler {
 }
 func (a *App) Close() error {
 	a.closeOnce.Do(func() {
+		a.orders.close()
+		a.replacements.close()
 		a.notifier.close()
 		a.reconciler.close()
 		a.client.CloseIdleConnections()
@@ -107,7 +115,12 @@ func (a *App) Close() error {
 	})
 	return a.closeErr
 }
-func (a *App) RunOnce() { a.reconciler.runOnce(); a.notifier.runOnce() }
+func (a *App) RunOnce() {
+	a.reconciler.runOnce()
+	a.notifier.runOnce()
+	a.replacements.runOnce()
+	a.orders.runOnce()
+}
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -370,6 +383,8 @@ func (a *App) manualDNS(id, action string) any {
 }
 
 func (a *App) routes() {
+	a.replacementRoutes()
+	a.orderRoutes()
 	a.notificationRoutes()
 	a.route("GET /api/health", "", func(w http.ResponseWriter, r *http.Request) any { return row{"ok": true} })
 	a.route("POST /api/auth/login", "origin", func(w http.ResponseWriter, r *http.Request) any {

@@ -20,6 +20,9 @@ func (a *App) poolRoutes() {
 		bodyObject(w, r, &data, []string{"name", "hostname", "zone_id"})
 		validatePool(&data)
 		return a.withStore(func() any {
+			if a.s.one("SELECT id FROM server_orders WHERE domain=?", data.Hostname) != nil {
+				fail(409, "Домен зарезервирован для ноды")
+			}
 			if data.AutomationEnabled {
 				fail(409, "Save profile and add targets before enabling automation")
 			}
@@ -71,6 +74,12 @@ func (a *App) poolRoutes() {
 				}()
 				validatePool(&data)
 			}()
+			if data.Hostname != old["hostname"] && a.s.one("SELECT id FROM server_orders WHERE domain=?", data.Hostname) != nil {
+				fail(409, "Домен зарезервирован для ноды")
+			}
+			if (data.Hostname != old["hostname"] || data.ZoneID != old["zone_id"]) && a.s.orderForPool(id) {
+				fail(409, "Дождитесь завершения заказа сервера для этого пула")
+			}
 			if (data.Hostname != old["hostname"] || data.ZoneID != old["zone_id"]) && a.s.one("SELECT id FROM targets WHERE pool_id=?", id) != nil {
 				fail(409, "Hostname and zone cannot change while targets are enrolled")
 			}
@@ -132,6 +141,12 @@ func (a *App) poolRoutes() {
 		var p, existing row
 		a.withStore(func() any {
 			p = a.pool(id)
+			if data.RemnawaveUUID != nil && a.s.one("SELECT id FROM replacement_jobs WHERE node_uuid=lower(?) AND "+replacementActive, *data.RemnawaveUUID) != nil {
+				fail(409, "Эта нода участвует в автозамене")
+			}
+			if a.s.reservedReplacementIP(data.IP) {
+				fail(409, "IP зарезервирован для автозамены")
+			}
 			existing = a.s.one("SELECT * FROM targets WHERE pool_id=? AND (ip=? OR dns_new_ip=?)", id, data.IP, data.IP)
 			return nil
 		})

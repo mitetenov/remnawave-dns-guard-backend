@@ -37,6 +37,19 @@ func TestCloudflarePaginationAndExactHostname(t *testing.T) {
 	}
 }
 
+func TestCloudflareUnusedOrderDomainCanHaveZeroPages(t *testing.T) {
+	c := &Cloudflare{"token", providerClient(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("name") != "de-01.example.com" {
+			t.Fatal("domain lookup escaped its scope")
+		}
+		return response(row{"success": true, "result": []row{}, "result_info": row{"total_pages": 0}}, 200), nil
+	})})}
+	records, err := c.addressRecords(row{"zone_id": "zone", "hostname": "de-01.example.com"})
+	if err != nil || len(records) != 0 {
+		t.Fatal(records, err)
+	}
+}
+
 func TestCloudflarePageSizesRespectEndpointLimits(t *testing.T) {
 	for _, test := range []struct{ path, perPage string }{{"/zones", "50"}, {"/zones/zone/dns_records", "100"}} {
 		t.Run(test.path, func(t *testing.T) {
