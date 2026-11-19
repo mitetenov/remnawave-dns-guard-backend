@@ -55,7 +55,7 @@ func newReplacementWorker(a *App) *replacementWorker {
 				defer a.s.mu.Unlock()
 				token := a.s.get("upcloud_token")
 				if token == "" {
-					return nil, errors.New("Укажите токен UpCloud в разделе автозамены")
+					return nil, errors.New("укажите токен UpCloud в разделе автозамены")
 				}
 				return newUpCloudReplacement(a.client, token), nil
 			}},
@@ -273,7 +273,7 @@ func (w *replacementWorker) preflight(j row, cloud replacementProvider) error {
 		return nil
 	}
 	if s.one("SELECT id FROM targets WHERE id!=? AND (ip=? OR dns_new_ip=? OR lower(remnawave_uuid)=?)", j["target_id"], j["old_ip"], j["old_ip"], j["node_uuid"]) != nil {
-		return errors.New("Эта нода или её IP используется ещё одной целью. Проверьте привязки перед заменой")
+		return errors.New("эта нода или её IP используется ещё одной целью. Проверьте привязки перед заменой")
 	}
 	s.transaction(func() {
 		s.exec("UPDATE replacement_jobs SET snapshot=?,release_after=?,old_record_ttl=MAX(old_record_ttl,?) WHERE id=?",
@@ -299,7 +299,7 @@ func (w *replacementWorker) step(j row) error {
 		}
 		adapter, ok := w.providers[str(j["provider"])]
 		if !ok {
-			return errors.New("Провайдер автозамены недоступен")
+			return errors.New("провайдер автозамены недоступен")
 		}
 		cloud, err := adapter.open()
 		if err != nil {
@@ -323,7 +323,7 @@ func (w *replacementWorker) step(j row) error {
 	case "dns":
 		return w.publish(j)
 	default:
-		return errors.New("Неизвестный этап автозамены")
+		return errors.New("неизвестный этап автозамены")
 	}
 	return nil
 }
@@ -379,7 +379,7 @@ func (w *replacementWorker) changeServer(j row, cloud replacementProvider) error
 	s := w.a.s
 	raw, err := s.cipher.decrypt(str(j["snapshot"]))
 	if err != nil {
-		return errors.New("Не удалось прочитать сохранённую конфигурацию сервера")
+		return errors.New("не удалось прочитать сохранённую конфигурацию сервера")
 	}
 	snapshot := json.RawMessage(raw)
 	oldIP := str(j["old_ip"])
@@ -414,7 +414,7 @@ func (w *replacementWorker) changeServer(j row, cloud replacementProvider) error
 			return err
 		}
 		if server == "" || server == j["server_uuid"] || !publicIPv4(ip) || ip == oldIP {
-			return errors.New("Провайдер не подтвердил новый сервер с другим публичным IPv4")
+			return errors.New("провайдер не подтвердил новый сервер с другим публичным IPv4")
 		}
 		w.commit(j, "ansible", func() {
 			s.exec("UPDATE replacement_jobs SET new_server_uuid=?,new_ip=? WHERE id=?", server, ip, j["id"])
@@ -450,7 +450,7 @@ func (w *replacementWorker) changeServer(j row, cloud replacementProvider) error
 				s.exec("UPDATE replacement_jobs SET release_after=? WHERE id=?", nowSeconds()+ttl, j["id"])
 				return nil
 			})
-			return errors.New("Прежний IP снова присутствует в DNS. Проверьте запись перед освобождением адреса")
+			return errors.New("прежний IP снова присутствует в DNS. Проверьте запись перед освобождением адреса")
 		}
 		if err = cloud.ReleaseOldIP(w.ctx, snapshot, str(j["new_server_uuid"]), str(j["new_ip"]), oldIP); err != nil {
 			return err
@@ -477,7 +477,7 @@ func (w *replacementWorker) moveNode(j row) error {
 		return nil
 	})
 	if conflict {
-		return errors.New("Новый IP уже используется другой целью")
+		return errors.New("новый IP уже используется другой целью")
 	}
 	if err = panel.checkReplacementNode(j, true); err != nil {
 		return err

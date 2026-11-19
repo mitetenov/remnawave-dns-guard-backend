@@ -82,7 +82,7 @@ func newOrderManager(a *App) *orderManager {
 			defer s.mu.Unlock()
 			token := s.get("upcloud_token")
 			if token == "" {
-				return nil, errors.New("Сохраните API-токен UpCloud в разделе автозамены")
+				return nil, errors.New("сохраните API-токен UpCloud в разделе автозамены")
 			}
 			return newUpCloudOrder(a.client, token), nil
 		}}
@@ -115,11 +115,11 @@ func (m *orderManager) close() { m.cancel(); m.wg.Wait() }
 
 func renderOrderDomain(pattern, country, pool string, serial int) (string, error) {
 	if !strings.Contains(pattern, "{n}") {
-		return "", errors.New("Шаблон домена должен содержать {n}")
+		return "", errors.New("шаблон домена должен содержать {n}")
 	}
 	domain := strings.NewReplacer("{n}", fmt.Sprintf("%02d", serial), "{country}", strings.ToLower(country), "{pool}", pool).Replace(pattern)
 	if !validReplacementOrderDomain(domain) || domain != strings.ToLower(domain) || domain == pool {
-		return "", errors.New("Шаблон должен давать отдельное доменное имя. Доступны {country}, {n} и {pool}")
+		return "", errors.New("шаблон должен давать отдельное доменное имя. Доступны {country}, {n} и {pool}")
 	}
 	return domain, nil
 }
@@ -140,7 +140,7 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID string) (
 		}
 		if kind == "plan" {
 			if !upCloudOrderZonePattern.MatchString(zone) {
-				return nil, errors.New("Выберите локацию UpCloud")
+				return nil, errors.New("выберите локацию UpCloud")
 			}
 			plans, err := c.Plans(ctx, zone)
 			if err != nil {
@@ -176,7 +176,7 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID string) (
 			var pool row
 			m.a.withStore(func() any { pool = m.a.s.one("SELECT hostname FROM pools WHERE id=?", poolID); return nil })
 			if pool == nil {
-				return nil, errors.New("Выберите существующий DNS-пул")
+				return nil, errors.New("выберите существующий DNS-пул")
 			}
 			hosts, err := orderRemnawaveList[orderRemnawaveHost](ctx, r, "hosts")
 			if err != nil {
@@ -204,7 +204,7 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID string) (
 			return nil
 		})
 	default:
-		return nil, errors.New("Неизвестный список параметров заказа")
+		return nil, errors.New("неизвестный список параметров заказа")
 	}
 	return choices, nil
 }
@@ -216,7 +216,7 @@ func selectionDigest(sel orderSelection) string {
 
 func matchOrderRequest(j row, sel orderSelection) (string, error) {
 	if str(j["selection_hash"]) != selectionDigest(sel) {
-		return "", errors.New("Этот запрос уже использован для другого заказа")
+		return "", errors.New("этот запрос уже использован для другого заказа")
 	}
 	return str(j["id"]), nil
 }
@@ -241,7 +241,7 @@ func (m *orderManager) selectedPlan(ctx context.Context, zone, quote string) (or
 func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSelection) (string, error) {
 	requestID, ok := canonicalUUID(requestID)
 	if !ok || !upCloudOrderZonePattern.MatchString(sel.Zone) || !oneOf(sel.Group, "nodes", "nodes_wl") {
-		return "", errors.New("Проверьте локацию и тип ноды")
+		return "", errors.New("проверьте локацию и тип ноды")
 	}
 	s := m.a.s
 	var prev row
@@ -266,7 +266,7 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 	}
 	i := slices.IndexFunc(profiles, func(p orderPanelProfile) bool { return p.ID == sel.ProfileID && len(p.Inbounds) > 0 })
 	if i < 0 {
-		return "", errors.New("Выберите существующий профиль Remnawave с настроенными входящими подключениями")
+		return "", errors.New("выберите существующий профиль Remnawave с настроенными входящими подключениями")
 	}
 	profile := profiles[i]
 	inbounds := make([]string, 0, len(profile.Inbounds))
@@ -290,7 +290,7 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 	}
 	p := s.one("SELECT p.*,t.domain_template FROM pools p JOIN server_order_templates t ON p.id=t.pool_id WHERE p.id=? AND p.profile IS NOT NULL", sel.PoolID)
 	if p == nil {
-		return "", errors.New("Настройте шаблон домена и профиль проверок выбранного DNS-пула")
+		return "", errors.New("настройте шаблон домена и профиль проверок выбранного DNS-пула")
 	}
 	serial := int(num(s.one("SELECT MAX(serial) AS n FROM server_orders WHERE country=?", country)["n"])) + 1
 	for {

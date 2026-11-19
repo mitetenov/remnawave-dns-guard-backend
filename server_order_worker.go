@@ -58,7 +58,7 @@ func (m *orderManager) advance(j row, stage string, fn func()) {
 func orderInbounds(j row) ([]string, error) {
 	var ids []string
 	if err := json.Unmarshal([]byte(str(j["inbounds"])), &ids); err != nil || len(ids) == 0 {
-		return nil, errors.New("Не удалось прочитать настройки профиля заказа")
+		return nil, errors.New("не удалось прочитать настройки профиля заказа")
 	}
 	return ids, nil
 }
@@ -67,7 +67,7 @@ func (m *orderManager) preflight(j row) error {
 	ctx, s := m.ctx, m.a.s
 	base, err := url.Parse(m.a.config.PublicOrigin)
 	if err != nil || base.Scheme != "https" || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
-		return errors.New("Укажите доступный по HTTPS PUBLIC_ORIGIN для регистрации SSH-ключа сервера")
+		return errors.New("укажите доступный по HTTPS PUBLIC_ORIGIN для регистрации SSH-ключа сервера")
 	}
 	if err = m.installer.ReadyForOrder(orderNode(j)); err != nil {
 		return err
@@ -135,7 +135,7 @@ func (m *orderManager) provision(j row) error {
 	}
 	raw, err := s.cipher.decrypt(str(j["snapshot"]))
 	if err != nil {
-		return errors.New("Не удалось прочитать сохранённый заказ UpCloud")
+		return errors.New("не удалось прочитать сохранённый заказ UpCloud")
 	}
 	if !truth(j["create_attempted"]) {
 		if _, err = m.selectedPlan(m.ctx, str(j["zone"]), str(j["quote"])); err != nil {
@@ -152,7 +152,7 @@ func (m *orderManager) provision(j row) error {
 	server, ip, err := c.ProvisionOrder(m.ctx, raw, str(j["id"]), claim)
 	if server != "" {
 		if _, ok := canonicalUUID(server); !ok || (j["server_uuid"] != nil && j["server_uuid"] != server) {
-			return errors.New("Идентификатор сервера UpCloud не совпадает с сохранённым заказом")
+			return errors.New("идентификатор сервера UpCloud не совпадает с сохранённым заказом")
 		}
 		m.a.withStore(func() any {
 			s.exec("UPDATE server_orders SET server_uuid=?,can_retry_create=0 WHERE id=? AND stage='provision' AND create_attempted=1 AND (server_uuid IS NULL OR server_uuid=?)", server, j["id"], server)
@@ -247,7 +247,7 @@ func (m *orderManager) enrollTarget(j row) error {
 	defer s.mu.Unlock()
 	if s.one("SELECT id FROM targets WHERE ip=? OR dns_new_ip=? OR lower(remnawave_uuid)=?", j["ip"], j["ip"], j["node_uuid"]) != nil ||
 		s.one("SELECT target_id FROM replacement_bindings WHERE provider='upcloud' AND server_uuid=?", j["server_uuid"]) != nil {
-		return errors.New("Сервер, IP или нода уже привязаны к другой цели")
+		return errors.New("сервер, IP или нода уже привязаны к другой цели")
 	}
 	id := uid()
 	s.transaction(func() {

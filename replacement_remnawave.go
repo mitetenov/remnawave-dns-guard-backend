@@ -66,7 +66,7 @@ func (r *Remnawave) replacementHosts(job row, update bool) error {
 		}
 		nodes := host["node_uuids"].([]any)
 		if len(nodes) != 1 || !strings.EqualFold(str(nodes[0]), str(job["node_uuid"])) {
-			return errors.New("Хост Remnawave с прежним IP не имеет однозначной привязки к этой ноде")
+			return errors.New("хост Remnawave с прежним IP не имеет однозначной привязки к этой ноде")
 		}
 		ids = append(ids, str(host["uuid"]))
 	}
