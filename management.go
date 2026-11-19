@@ -13,6 +13,12 @@ func (a *App) managementRoutes() {
 		return a.withStore(func() any {
 			id := r.PathValue("id")
 			p := a.pool(id)
+			if a.s.orderForPool(id) {
+				fail(409, "Дождитесь завершения заказа сервера для этого пула")
+			}
+			if a.s.one("SELECT id FROM replacement_jobs WHERE pool_id=? AND "+replacementActive, id) != nil {
+				fail(409, "Для узла пула выполняется автозамена")
+			}
 			a.s.transaction(func() {
 				a.s.exec("DELETE FROM targets WHERE pool_id=?", id)
 				a.s.exec("DELETE FROM pools WHERE id=?", id)
@@ -35,6 +41,7 @@ func (a *App) managementRoutes() {
 		a.reconciler.dnsMu.Lock()
 		defer a.reconciler.dnsMu.Unlock()
 		return a.withStore(func() any {
+			a.s.requireIdleReplacement(r.PathValue("id"))
 			a.s.forgetTarget(a.target(r.PathValue("id")))
 			return row{"ok": true}
 		})
@@ -60,6 +67,7 @@ func (a *App) managementRoutes() {
 		id := r.PathValue("id")
 		var target, pool row
 		a.withStore(func() any {
+			a.s.requireIdleReplacement(id)
 			target = a.target(id)
 			pool = a.pool(str(target["pool_id"]))
 			if _, ok := fields["name"]; !ok {
@@ -73,6 +81,9 @@ func (a *App) managementRoutes() {
 					fail(409, "Дождитесь завершения смены IP узла перед следующим изменением")
 				}
 			} else if data.IP != target["ip"] {
+				if a.s.reservedReplacementIP(data.IP) {
+					fail(409, "IP зарезервирован для автозамены")
+				}
 				if target["dns_action"] != nil {
 					fail(409, "Дождитесь завершения текущей операции DNS перед сменой IP")
 				}

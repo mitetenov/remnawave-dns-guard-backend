@@ -12,6 +12,7 @@
 *.pem
 *.key
 backups/
+/replacement/
 /data/
 __pycache__/
 *.py[cod]

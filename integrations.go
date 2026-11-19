@@ -105,7 +105,7 @@ func (c *Cloudflare) pages(path string, params url.Values) ([]row, error) {
 			if m, ok := info.(map[string]any); ok {
 				if n, ok := m["total_pages"]; ok {
 					f, valid := n.(float64)
-					if !valid || f < 1 || f != float64(int(f)) {
+					if !valid || f < 0 || f != float64(int(f)) || (f == 0 && (page != 1 || len(rows) != 0)) {
 						return nil, integration("Cloudflare returned invalid pagination metadata")
 					}
 					total = int(f)
@@ -364,8 +364,12 @@ func (r *Remnawave) hosts() ([]row, error) {
 }
 
 func (r *Remnawave) setHostDisabled(uuid string, disabled bool) error {
-	body, _ := json.Marshal(row{"uuid": uuid, "isDisabled": disabled})
-	req, e := http.NewRequest(http.MethodPatch, r.url+"/api/hosts", bytes.NewReader(body))
+	return r.patch("hosts", row{"uuid": uuid, "isDisabled": disabled})
+}
+
+func (r *Remnawave) patch(resource string, update row) error {
+	body, _ := json.Marshal(update)
+	req, e := http.NewRequest(http.MethodPatch, r.url+"/api/"+resource, bytes.NewReader(body))
 	if e != nil {
 		return integration("Remnawave API unavailable or request rejected")
 	}

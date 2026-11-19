@@ -21,6 +21,7 @@
 **/*.pem
 **/*.key
 backups
+replacement
 data
 coverage
 agent
