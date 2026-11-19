@@ -75,6 +75,20 @@ fi
 	return newReplacementAnsible(), dir
 }
 
+func TestReplacementAnsibleDefaultsSSHUserToRoot(t *testing.T) {
+	const key = "REPLACEMENT_ANSIBLE_SSH_USER"
+	t.Setenv(key, "")
+	if got := newReplacementAnsible().sshUser; got != "root" {
+		t.Errorf("SSH user with an empty environment variable = %q, want root", got)
+	}
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatal(err)
+	}
+	if got := newReplacementAnsible().sshUser; got != "root" {
+		t.Errorf("SSH user with no environment variable = %q, want root", got)
+	}
+}
+
 func TestReplacementAnsibleScopesBothPlaybooks(t *testing.T) {
 	a, dir := replacementTestRunner(t)
 	if err := a.ReadyForNode(replacementTestNodeID); err != nil {
