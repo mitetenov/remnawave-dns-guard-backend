@@ -22,6 +22,11 @@ var replacementOrderDomainLabel = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-
 
 const replacementOrderCheckID = "00000000-0000-4000-8000-000000000000"
 
+func (a *replacementAnsible) checkOrderConfiguration(ctx context.Context) error {
+	_, err := a.ready(ctx, true)
+	return err
+}
+
 func (a *replacementAnsible) ReadyForOrder(node orderAnsibleNode) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -91,11 +96,7 @@ func (a *replacementAnsible) prepareOrderInventory(work string, node orderAnsibl
 	if err := os.Mkdir(input, 0o700); err != nil {
 		return "", errors.New("cannot prepare new node Ansible inventory")
 	}
-	groupVars := filepath.Join(a.repoDir, "inventory", "group_vars")
-	if info, err := os.Stat(groupVars); err != nil || !info.IsDir() {
-		return "", errors.New("new node playbooks require the repository inventory/group_vars directory")
-	}
-	if err := os.Symlink(groupVars, filepath.Join(input, "group_vars")); err != nil {
+	if err := os.Symlink(a.orderGroupVarsDir, filepath.Join(input, "group_vars")); err != nil {
 		return "", errors.New("cannot load new node Ansible group variables")
 	}
 	// Start with an empty host entry and only the matching group. This source has

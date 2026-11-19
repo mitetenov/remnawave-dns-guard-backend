@@ -16,7 +16,11 @@ import (
 	"time"
 )
 
-const replacementAnsibleEnv = "REPLACEMENT_ANSIBLE_"
+const (
+	replacementAnsibleEnv        = "REPLACEMENT_ANSIBLE_"
+	bundledReplacementAnsibleDir = "/opt/dns-guard/ansible"
+	defaultOrderGroupVarsDir     = "/run/dns-guard/replacement/group_vars"
+)
 
 var replacementSSHUser = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$`)
 var replacementListedHost = regexp.MustCompile(`(?m)^[\t ]+hosts \(1\):\r?\n[\t ]+replacement[\t ]*\r?$`)
@@ -24,6 +28,7 @@ var replacementListedHost = regexp.MustCompile(`(?m)^[\t ]+hosts \(1\):\r?\n[\t 
 type replacementAnsible struct {
 	installPlaybook, tuningPlaybook string
 	repoDir                         string
+	orderGroupVarsDir               string
 	sshUser, sshKey, knownHosts     string
 	nodeVarsDir, timeout            string
 }
@@ -33,17 +38,37 @@ func newReplacementAnsible() *replacementAnsible {
 	if sshUser == "" {
 		sshUser = "root"
 	}
+	repoDir := os.Getenv(replacementAnsibleEnv + "MANUAL_REPO_DIR")
+	if repoDir == "" {
+		repoDir = os.Getenv(replacementAnsibleEnv + "REPO_DIR")
+	}
 
 	return &replacementAnsible{
-		installPlaybook: os.Getenv(replacementAnsibleEnv + "INSTALL_PLAYBOOK"),
-		tuningPlaybook:  os.Getenv(replacementAnsibleEnv + "TUNING_PLAYBOOK"),
-		repoDir:         os.Getenv(replacementAnsibleEnv + "REPO_DIR"),
-		sshUser:         sshUser,
-		sshKey:          os.Getenv(replacementAnsibleEnv + "SSH_KEY"),
-		knownHosts:      os.Getenv(replacementAnsibleEnv + "KNOWN_HOSTS"),
-		nodeVarsDir:     os.Getenv(replacementAnsibleEnv + "NODE_VARS_DIR"),
-		timeout:         env(replacementAnsibleEnv+"TIMEOUT", "20m"),
+		installPlaybook:   os.Getenv(replacementAnsibleEnv + "INSTALL_PLAYBOOK"),
+		tuningPlaybook:    os.Getenv(replacementAnsibleEnv + "TUNING_PLAYBOOK"),
+		repoDir:           repoDir,
+		orderGroupVarsDir: os.Getenv(replacementAnsibleEnv + "GROUP_VARS_DIR"),
+		sshUser:           sshUser,
+		sshKey:            os.Getenv(replacementAnsibleEnv + "SSH_KEY"),
+		knownHosts:        os.Getenv(replacementAnsibleEnv + "KNOWN_HOSTS"),
+		nodeVarsDir:       os.Getenv(replacementAnsibleEnv + "NODE_VARS_DIR"),
+		timeout:           env(replacementAnsibleEnv+"TIMEOUT", "20m"),
 	}
+}
+
+func newOrderAnsible() *replacementAnsible {
+	a := newReplacementAnsible()
+	a.repoDir = os.Getenv(replacementAnsibleEnv + "REPO_DIR")
+	if a.repoDir == "" {
+		a.repoDir = bundledReplacementAnsibleDir
+	}
+	if a.orderGroupVarsDir == "" {
+		a.orderGroupVarsDir = filepath.Join(a.repoDir, "inventory", "group_vars")
+		if a.repoDir == bundledReplacementAnsibleDir {
+			a.orderGroupVarsDir = defaultOrderGroupVarsDir
+		}
+	}
+	return a
 }
 
 func (a *replacementAnsible) Ready() error {
@@ -65,8 +90,11 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Durati
 	type requiredFile struct{ name, path string }
 	var files []requiredFile
 	binaries := []string{"ansible-playbook", "ssh", "ssh-keygen"}
+	if order && a.repoDir == "" {
+		return 0, errors.New("new node orders require the bundled Ansible files or REPLACEMENT_ANSIBLE_REPO_DIR")
+	}
 	if a.repoDir != "" {
-		if err := a.readyRepository(); err != nil {
+		if err := a.readyRepository(order); err != nil {
 			return 0, err
 		}
 		if !order && a.nodeVarsDir == "" {
@@ -74,10 +102,16 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Durati
 		}
 		binaries = append(binaries, "ansible-inventory", "ssh-keyscan")
 	} else {
-		if order {
-			return 0, errors.New("new node orders require REPLACEMENT_ANSIBLE_REPO_DIR")
+		if a.installPlaybook == "" && a.tuningPlaybook == "" {
+			return 0, errors.New("для нод с ручной привязкой подключите репозиторий Ansible через REPLACEMENT_ANSIBLE_MANUAL_REPO_DIR")
 		}
 		files = []requiredFile{{"INSTALL_PLAYBOOK", a.installPlaybook}, {"TUNING_PLAYBOOK", a.tuningPlaybook}}
+	}
+	if order {
+		info, err := os.Stat(a.orderGroupVarsDir)
+		if !filepath.IsAbs(a.orderGroupVarsDir) || err != nil || !info.IsDir() {
+			return 0, fmt.Errorf("подключите каталог настроек нод %s или задайте REPLACEMENT_ANSIBLE_GROUP_VARS_DIR", a.orderGroupVarsDir)
+		}
 	}
 	if !order {
 		files = append(files, requiredFile{"KNOWN_HOSTS", a.knownHosts})

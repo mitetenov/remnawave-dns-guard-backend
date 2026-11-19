@@ -24,17 +24,24 @@ type replacementInventoryGroup struct {
 	Children []string `json:"children"`
 }
 
-func (a *replacementAnsible) readyRepository() error {
+func (a *replacementAnsible) readyRepository(order bool) error {
 	if !filepath.IsAbs(a.repoDir) {
 		return errors.New("REPLACEMENT_ANSIBLE_REPO_DIR must point to the Ansible repository using an absolute path")
 	}
-	for _, name := range []string{
-		"inventory/hosts.yml", "playbooks/nodes.yml", "playbooks/nodes-wl.yml",
+	files := []string{
+		"playbooks/nodes.yml", "playbooks/nodes-wl.yml",
 		"roles/common/tasks/main.yml", "roles/docker/tasks/main.yml", "roles/stack_nodes/tasks/main.yml",
 		"roles/ssl/tasks/main.yml", "roles/warp_native/tasks/main.yml",
-	} {
+	}
+	if !order {
+		files = append(files, "inventory/hosts.yml")
+	}
+	for _, name := range files {
 		info, err := os.Stat(filepath.Join(a.repoDir, name))
 		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			if a.repoDir == bundledReplacementAnsibleDir {
+				return fmt.Errorf("в образе backend отсутствует файл Ansible %s", name)
+			}
 			return fmt.Errorf("REPLACEMENT_ANSIBLE_REPO_DIR requires %s", name)
 		}
 	}
@@ -118,6 +125,10 @@ become = true
 		hostVars["stack_node_secret_key"] = json.RawMessage(secret)
 		hostVars["stack_node_port"] = orderRemnawaveNodePort
 		delete(hostVars, "stack_nodes_env_content")
+		if a.repoDir == bundledReplacementAnsibleDir {
+			// The bundled roles omit the upstream's deployment-specific Alloy configuration.
+			hostVars["common_alloy_enabled"] = false
+		}
 	}
 	if err := validateReplacementRepositoryVars(hostVars, group); err != nil {
 		return err

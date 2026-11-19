@@ -5,10 +5,29 @@ package guard
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestOrderAnsibleDefaultsToBundledFiles(t *testing.T) {
+	t.Setenv("REPLACEMENT_ANSIBLE_REPO_DIR", "")
+	t.Setenv("REPLACEMENT_ANSIBLE_GROUP_VARS_DIR", "")
+	manualRepo := t.TempDir()
+	t.Setenv("REPLACEMENT_ANSIBLE_MANUAL_REPO_DIR", manualRepo)
+	if a := newOrderAnsible(); a.repoDir != bundledReplacementAnsibleDir || a.orderGroupVarsDir != defaultOrderGroupVarsDir {
+		t.Fatalf("unexpected bundled paths: %q, %q", a.repoDir, a.orderGroupVarsDir)
+	}
+	if a := newReplacementAnsible(); a.repoDir != manualRepo {
+		t.Fatalf("manual inventory path = %q, want %q", a.repoDir, manualRepo)
+	}
+	externalRepo := t.TempDir()
+	t.Setenv("REPLACEMENT_ANSIBLE_REPO_DIR", externalRepo)
+	if a := newOrderAnsible(); a.repoDir != externalRepo || a.orderGroupVarsDir != filepath.Join(externalRepo, "inventory", "group_vars") {
+		t.Fatalf("unexpected external paths: %q, %q", a.repoDir, a.orderGroupVarsDir)
+	}
+}
 
 func TestReplacementAnsibleOrdersUseGeneratedHostAndGroupVars(t *testing.T) {
 	for _, tc := range []struct{ group, playbook, fixtureAlias string }{
@@ -19,6 +38,14 @@ func TestReplacementAnsibleOrdersUseGeneratedHostAndGroupVars(t *testing.T) {
 			f := newReplacementRepositoryFixture(t)
 			t.Setenv("REPLACEMENT_ANSIBLE_NODE_VARS_DIR", "")
 			t.Setenv("REPLACEMENT_ANSIBLE_KNOWN_HOSTS", "")
+			if err := os.Remove(filepath.Join(f.repo, "inventory", "hosts.yml")); err != nil {
+				t.Fatal(err)
+			}
+			groupVars := filepath.Join(f.root, "external group vars")
+			if err := os.Rename(filepath.Join(f.repo, "inventory", "group_vars"), groupVars); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("REPLACEMENT_ANSIBLE_GROUP_VARS_DIR", groupVars)
 			const alias = "ordered-node-4d19a9eb"
 			const domain = "ordered-node.example.invalid"
 			const hostKey = "ssh-ed25519 AQID"
@@ -31,6 +58,7 @@ case "$2" in */input/inventory.yml) ;; *) exit 1 ;; esac
 test "$3" = --list && test "$4" = --limit && test "$5" = ordered-node-4d19a9eb
 test "$6" = --playbook-dir && test "$7" = "${2%/*}"
 test -L "$7/group_vars" && test ! -e "$7/host_vars"
+test "$(readlink "$7/group_vars")" = "$observer/external group vars"
 cp "$2" "$observer/order-inventory-source"
 cat "$observer/order-normalized-inventory.json"
 `, 0o700)
@@ -58,7 +86,7 @@ if [ "$1" = -l ]; then cat >/dev/null; else printf 'ssh-ed25519 AAAA login-comme
 			}
 			writeReplacementRepositoryFixture(t, filepath.Join(f.root, "order-normalized-inventory.json"), string(listed), 0o600)
 
-			runner := newReplacementAnsible()
+			runner := newOrderAnsible()
 			order := orderAnsibleNode{Alias: alias, Group: tc.group, Domain: domain}
 			if err := runner.ReadyForOrder(order); err != nil {
 				t.Fatal(err)

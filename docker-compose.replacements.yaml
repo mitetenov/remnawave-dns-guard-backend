@@ -8,7 +8,7 @@ services:
         bind:
           create_host_path: false
     environment:
-      REPLACEMENT_ANSIBLE_REPO_DIR: ${REPLACEMENT_ANSIBLE_REPO_DIR:-/run/dns-guard/replacement/ansible}
+      REPLACEMENT_ANSIBLE_REPO_DIR: ${REPLACEMENT_ANSIBLE_REPO_DIR:-}
       REPLACEMENT_ANSIBLE_NODE_VARS_DIR: ${REPLACEMENT_ANSIBLE_NODE_VARS_DIR:-/run/dns-guard/replacement/node_vars}
       REPLACEMENT_ANSIBLE_SSH_USER: ${REPLACEMENT_ANSIBLE_SSH_USER:-root}
       REPLACEMENT_ANSIBLE_SSH_KEY: ${REPLACEMENT_ANSIBLE_SSH_KEY:-/run/dns-guard/replacement/ssh_key}

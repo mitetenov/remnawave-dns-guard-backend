@@ -13,12 +13,13 @@ golangci-lint run
 go test -count=1 ./...
 go test -race -vet=off -count=1 ./...
 go build ./...
-docker build --platform linux/amd64 -t remnawave-dns-guard-backend:local .
+ANSIBLE_REPO_TOKEN="$(gh auth token)" docker buildx build --load --platform linux/amd64 \
+  --secret id=ansible_repo_token,env=ANSIBLE_REPO_TOKEN -t remnawave-dns-guard-backend:local .
 ```
 
 Оставлены изолированные unit-тесты: парсинг подписок, URL/IP и профилей, версии возможностей агента, Fernet/Unicode golden-векторы, политика активации узлов после успешных серий всех доступных чекеров и подтверждения DNS, а также provider API с подменённым HTTP transport. Проверки не открывают SQLite и не запускают другие сервисы, контейнеры или бинарные процессы. Python-интеграционные harness, Go-to-Go wire suite, image smoke и тесты реальной БД удалены по принятой политике тестирования.
 
-CI использует Ubuntu 26.04, проверяет tidy/verify/gofmt/vet/golangci-lint v2.15.0, unit/race и production build. Compose проверяется с инертными CI-параметрами; Docker-образ только собирается и проверяется на AMD64. После этих проверок main сохраняет публикацию latest и sha-<полный commit SHA>; PR не публикует. Живые Cloudflare/Remnawave, базы, DNS и узлы в тестах не используются. Runtime SQLite, HTTP API, healthcheck и backup/restore остаются production-функциями.
+CI использует Ubuntu 26.04, проверяет tidy/verify/gofmt/vet/golangci-lint v2.15.0, unit/race и production build. Compose проверяется с инертными CI-параметрами. При сборке образа AMD64 проверяется синтаксис двух встроенных плейбуков. Для сборки нужен доступ на чтение `mitetenov/ansible`. После этих проверок main публикует latest и sha-<полный commit SHA>. Тесты замены узла запускают имитацию Ansible и SSH. Тесты изолированы от UpCloud, Cloudflare, Remnawave, DNS и действующих узлов. [Сборка и CI](../README.md#сборка-и-ci)
 
 ## Частые причины отказа
 
@@ -36,4 +37,4 @@ CI использует Ubuntu 26.04, проверяет tidy/verify/gofmt/vet/g
 | Исключённый IP не вернулся | Автоматика, ручное включение, серия успехов и доступность Cloudflare |
 | Docker unhealthy не перезапускается | Docker restart реагирует на завершение процесса, а не только на healthcheck |
 
-В runtime нет shell, curl, Python и sqlite CLI. Healthcheck выполняет `/dns-guard --healthcheck`; для резервного копирования используйте встроенные `--backup`/`--restore` по инструкции. Передавайте обезличенные статусы и версии, не `.env`, SQLite, URI или конфиги с секретами.
+Образ backend включает Ansible, плейбуки для заказов и OpenSSH. Healthcheck выполняет `/dns-guard --healthcheck`; для резервного копирования используйте встроенные `--backup`/`--restore` по инструкции. Передавайте обезличенные статусы и версии, не `.env`, SQLite, URI или конфиги с секретами.
