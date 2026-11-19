@@ -29,11 +29,16 @@ type replacementAnsible struct {
 }
 
 func newReplacementAnsible() *replacementAnsible {
+	sshUser := os.Getenv(replacementAnsibleEnv + "SSH_USER")
+	if sshUser == "" {
+		sshUser = "root"
+	}
+
 	return &replacementAnsible{
 		installPlaybook: os.Getenv(replacementAnsibleEnv + "INSTALL_PLAYBOOK"),
 		tuningPlaybook:  os.Getenv(replacementAnsibleEnv + "TUNING_PLAYBOOK"),
 		repoDir:         os.Getenv(replacementAnsibleEnv + "REPO_DIR"),
-		sshUser:         os.Getenv(replacementAnsibleEnv + "SSH_USER"),
+		sshUser:         sshUser,
 		sshKey:          os.Getenv(replacementAnsibleEnv + "SSH_KEY"),
 		knownHosts:      os.Getenv(replacementAnsibleEnv + "KNOWN_HOSTS"),
 		nodeVarsDir:     os.Getenv(replacementAnsibleEnv + "NODE_VARS_DIR"),
