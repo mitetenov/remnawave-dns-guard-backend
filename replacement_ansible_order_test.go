@@ -16,7 +16,7 @@ func TestOrderAnsibleDefaultsToBundledFiles(t *testing.T) {
 	t.Setenv("REPLACEMENT_ANSIBLE_GROUP_VARS_DIR", "")
 	manualRepo := t.TempDir()
 	t.Setenv("REPLACEMENT_ANSIBLE_MANUAL_REPO_DIR", manualRepo)
-	if a := newOrderAnsible(); a.repoDir != bundledReplacementAnsibleDir || a.orderGroupVarsDir != defaultOrderGroupVarsDir {
+	if a := newOrderAnsible(); a.repoDir != bundledReplacementAnsibleDir || a.orderGroupVarsDir != "" {
 		t.Fatalf("unexpected bundled paths: %q, %q", a.repoDir, a.orderGroupVarsDir)
 	}
 	if a := newReplacementAnsible(); a.repoDir != manualRepo {
@@ -24,8 +24,44 @@ func TestOrderAnsibleDefaultsToBundledFiles(t *testing.T) {
 	}
 	externalRepo := t.TempDir()
 	t.Setenv("REPLACEMENT_ANSIBLE_REPO_DIR", externalRepo)
-	if a := newOrderAnsible(); a.repoDir != externalRepo || a.orderGroupVarsDir != filepath.Join(externalRepo, "inventory", "group_vars") {
-		t.Fatalf("unexpected external paths: %q, %q", a.repoDir, a.orderGroupVarsDir)
+	groupVars := filepath.Join(externalRepo, "inventory", "group_vars")
+	if err := os.MkdirAll(groupVars, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if a := newOrderAnsible(); a.repoDir != externalRepo {
+		t.Fatalf("unexpected external repository: %q", a.repoDir)
+	} else if dir, err := a.orderGroupVars(); err != nil || dir != groupVars {
+		t.Fatalf("unexpected external group variables: %q, %v", dir, err)
+	}
+}
+
+func TestBundledOrderVarsUseExternalDeploymentSettings(t *testing.T) {
+	t.Setenv("REPLACEMENT_ANSIBLE_REPO_DIR", "")
+	t.Setenv("REPLACEMENT_ANSIBLE_CERTBOT_EMAIL", "")
+	t.Setenv("REPLACEMENT_ANSIBLE_XHTTP_PATH", "")
+	t.Setenv("REPLACEMENT_ANSIBLE_XHTTP_UPSTREAM", "")
+	runner := newOrderAnsible()
+	if err := validateBundledOrderVars(runner.bundledOrderVars("nodes_wl"), "nodes_wl"); err == nil ||
+		!strings.Contains(err.Error(), "REPLACEMENT_ANSIBLE_CERTBOT_EMAIL") || !strings.Contains(err.Error(), "REPLACEMENT_ANSIBLE_XHTTP_PATH") {
+		t.Fatalf("expected both deployment settings in the error, got %v", err)
+	}
+
+	t.Setenv("REPLACEMENT_ANSIBLE_CERTBOT_EMAIL", "admin@example.test")
+	t.Setenv("REPLACEMENT_ANSIBLE_XHTTP_PATH", "/selected-profile/")
+	t.Setenv("REPLACEMENT_ANSIBLE_XHTTP_UPSTREAM", "127.0.0.1:9443")
+	runner = newOrderAnsible()
+	for _, group := range []string{"nodes", "nodes_wl"} {
+		vars := runner.bundledOrderVars(group)
+		vars["nginx_node_domain"] = json.RawMessage(`"node.example.test"`)
+		if err := validateBundledOrderVars(vars, group); err != nil {
+			t.Fatalf("%s: %v", group, err)
+		}
+		if err := validateReplacementRepositoryVars(vars, group); err != nil {
+			t.Fatalf("%s: %v", group, err)
+		}
+		if group == "nodes_wl" && replacementVarString(vars, "nginx_node_xhttp_upstream") != "127.0.0.1:9443" {
+			t.Fatal("expected configured XHTTP upstream")
+		}
 	}
 }
 
@@ -88,7 +124,7 @@ if [ "$1" = -l ]; then cat >/dev/null; else printf 'ssh-ed25519 AAAA login-comme
 
 			runner := newOrderAnsible()
 			order := orderAnsibleNode{Alias: alias, Group: tc.group, Domain: domain}
-			if err := runner.ReadyForOrder(order); err != nil {
+			if err := runner.ReadyForOrder(context.Background(), order); err != nil {
 				t.Fatal(err)
 			}
 			f.wantNoPlaybookRun(t)

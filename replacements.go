@@ -214,7 +214,7 @@ func (w *replacementWorker) preflight(j row, cloud replacementProvider) error {
 	a := w.a
 	order := w.managedOrder(j)
 	if order != nil {
-		if err := a.orders.installer.ReadyForOrder(orderNode(order)); err != nil {
+		if err := a.orders.installer.ReadyForOrder(w.ctx, orderNode(order)); err != nil {
 			return err
 		}
 	} else {

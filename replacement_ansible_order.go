@@ -3,10 +3,12 @@ package guard
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,12 +25,17 @@ var replacementOrderDomainLabel = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-
 const replacementOrderCheckID = "00000000-0000-4000-8000-000000000000"
 
 func (a *replacementAnsible) checkOrderConfiguration(ctx context.Context) error {
-	_, err := a.ready(ctx, true)
-	return err
+	_, readyErr := a.ready(ctx, true)
+	if a != nil && a.repoDir == bundledReplacementAnsibleDir {
+		if dir, err := a.orderGroupVars(); err == nil && dir == "" {
+			return errors.Join(readyErr, validateBundledOrderVars(a.bundledOrderVars("nodes"), "nodes"))
+		}
+	}
+	return readyErr
 }
 
-func (a *replacementAnsible) ReadyForOrder(node orderAnsibleNode) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+func (a *replacementAnsible) ReadyForOrder(ctx context.Context, node orderAnsibleNode) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	return a.processOrder(ctx, "192.0.2.1", replacementOrderCheckID, node, true)
 }
@@ -91,13 +98,98 @@ func validReplacementOrderDomain(domain string) bool {
 	return true
 }
 
+func (a *replacementAnsible) orderGroupVars() (string, error) {
+	dir := a.orderGroupVarsDir
+	optional := dir == "" && a.repoDir == bundledReplacementAnsibleDir
+	if optional {
+		dir = defaultOrderGroupVarsDir
+	} else if dir == "" {
+		dir = filepath.Join(a.repoDir, "inventory", "group_vars")
+	}
+	info, err := os.Stat(dir)
+	if optional && errors.Is(err, os.ErrNotExist) {
+		dir = filepath.Join(filepath.Dir(defaultOrderGroupVarsDir), "ansible", "inventory", "group_vars")
+		info, err = os.Stat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+	}
+	if !filepath.IsAbs(dir) || err != nil || !info.IsDir() {
+		return "", fmt.Errorf("подключите каталог настроек нод %s или задайте REPLACEMENT_ANSIBLE_GROUP_VARS_DIR с абсолютным путём внутри backend", dir)
+	}
+	return dir, nil
+}
+
+func (a *replacementAnsible) bundledOrderVars(group string) map[string]any {
+	defaults := map[string]any{
+		"node_initial_ssh_port": 22,
+		"node_ssh_listen_port":  22222,
+		"stack_project_src":     "/opt/remnawave-node",
+		"stack_files_src":       filepath.Join(a.repoDir, "files", "nodes"),
+		"nginx_node_listen":     "127.0.0.1:4321 ssl proxy_protocol",
+		"nginx_acme_webroot":    "/var/www/certbot",
+		"nodes_certbot_enabled": true,
+		"ssl_certbot_email":     a.orderCertbotEmail,
+		"ssl_certbot_domains":   []string{"{{ nginx_node_domain }}"},
+		"ssl_fullchain_path":    "/etc/letsencrypt/live/{{ nginx_node_domain }}/fullchain.pem",
+		"ssl_privkey_path":      "/etc/letsencrypt/live/{{ nginx_node_domain }}/privkey.pem",
+	}
+	if group == "nodes_wl" {
+		upstream := a.orderXHTTPUpstream
+		if upstream == "" {
+			upstream = "127.0.0.1:8443"
+		}
+		defaults["stack_nodes_nginx_default_template"] = "conf/default-wl.conf.j2"
+		defaults["nginx_node_xhttp_path"] = a.orderXHTTPPath
+		defaults["nginx_node_xhttp_upstream"] = upstream
+	}
+	for name, value := range defaults {
+		raw, _ := json.Marshal(value)
+		defaults[name] = json.RawMessage(raw)
+	}
+	return defaults
+}
+
+func validateBundledOrderVars(vars map[string]any, group string) error {
+	var problems []string
+	if replacementUsesCertbot(vars) {
+		email := replacementVarString(vars, "ssl_certbot_email")
+		if !strings.Contains(email, "{{") {
+			addr, err := mail.ParseAddress(email)
+			if err != nil || addr.Address != email {
+				problems = append(problems, "укажите email Certbot в REPLACEMENT_ANSIBLE_CERTBOT_EMAIL или ssl_certbot_email")
+			}
+		}
+	}
+	if group == "nodes_wl" {
+		path := replacementVarString(vars, "nginx_node_xhttp_path")
+		if !strings.Contains(path, "{{") && !replacementNodeXHTTPPath.MatchString(path) {
+			problems = append(problems, "укажите путь XHTTP из профиля Remnawave в REPLACEMENT_ANSIBLE_XHTTP_PATH или nginx_node_xhttp_path")
+		}
+		upstream := replacementVarString(vars, "nginx_node_xhttp_upstream")
+		if !strings.Contains(upstream, "{{") && !validReplacementXHTTPUpstream(upstream) {
+			problems = append(problems, "укажите адрес 127.0.0.1 с портом XHTTP в REPLACEMENT_ANSIBLE_XHTTP_UPSTREAM или nginx_node_xhttp_upstream")
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, ". "))
+	}
+	return nil
+}
+
 func (a *replacementAnsible) prepareOrderInventory(work string, node orderAnsibleNode) (string, error) {
 	input := filepath.Join(work, "input")
 	if err := os.Mkdir(input, 0o700); err != nil {
 		return "", errors.New("cannot prepare new node Ansible inventory")
 	}
-	if err := os.Symlink(a.orderGroupVarsDir, filepath.Join(input, "group_vars")); err != nil {
-		return "", errors.New("cannot load new node Ansible group variables")
+	groupVars, err := a.orderGroupVars()
+	if err != nil {
+		return "", err
+	}
+	if groupVars != "" {
+		if err := os.Symlink(groupVars, filepath.Join(input, "group_vars")); err != nil {
+			return "", errors.New("cannot load new node Ansible group variables")
+		}
 	}
 	// Start with an empty host entry and only the matching group. This source has
 	// no host_vars or existing addresses and loads repository group variables only.

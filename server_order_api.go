@@ -43,7 +43,8 @@ func (a *App) orderRoutes() {
 		})
 	})
 	a.route("GET /api/server-orders/options", "ui", func(w http.ResponseWriter, r *http.Request) any {
-		choices, err := a.orders.options(r.Context(), r.URL.Query().Get("kind"), r.URL.Query().Get("zone"), r.URL.Query().Get("pool_id"))
+		query := r.URL.Query()
+		choices, err := a.orders.options(r.Context(), query.Get("kind"), query.Get("zone"), query.Get("pool_id"), query.Get("group"))
 		serverOrderError(err)
 		return row{"choices": choices}
 	})
