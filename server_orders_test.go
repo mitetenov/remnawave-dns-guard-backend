@@ -1,10 +1,47 @@
 package guard
 
 import (
+	"context"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 )
+
+type orderOptionsInstaller struct {
+	orderInstaller
+	configErr error
+	preflight func(orderAnsibleNode) error
+}
+
+func (i orderOptionsInstaller) checkOrderConfiguration(context.Context) error {
+	return i.configErr
+}
+
+func (i orderOptionsInstaller) ReadyForOrder(_ context.Context, node orderAnsibleNode) error {
+	return i.preflight(node)
+}
+
+func TestOrderOptionsCheckSetupBeforeLookingUpChoices(t *testing.T) {
+	configErr := errors.New("test SSH configuration error")
+	groupErr := errors.New("test XHTTP configuration error")
+	manager := &orderManager{
+		a: &App{config: Config{PublicOrigin: "http://guard.example.test"}},
+		installer: orderOptionsInstaller{configErr: configErr, preflight: func(node orderAnsibleNode) error {
+			if node.Group != "nodes_wl" || !validReplacementOrderDomain(node.Domain) {
+				t.Fatalf("unexpected preflight node %+v", node)
+			}
+			return groupErr
+		}},
+	}
+	if choices, err := manager.options(t.Context(), "zone", "", "", ""); len(choices) != 0 ||
+		!errors.Is(err, configErr) || !strings.Contains(err.Error(), "PUBLIC_ORIGIN") {
+		t.Fatalf("expected both setup errors before location lookup, got %v, %v", choices, err)
+	}
+	if choices, err := manager.options(t.Context(), "profile", "", "", "nodes_wl"); len(choices) != 0 || !errors.Is(err, groupErr) {
+		t.Fatalf("expected the group error before profile lookup, got %v, %v", choices, err)
+	}
+}
 
 func TestOrderQuoteTracksZonePriceAndConfiguration(t *testing.T) {
 	plan := orderCloudPlan{Code: "STARTER-2xCPU-2GB", Family: "starter", CPU: 2, MemoryMB: 2048, StorageGB: 30, StorageTier: "standard", Price: 0.01, Currency: "EUR"}

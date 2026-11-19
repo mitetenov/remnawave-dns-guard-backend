@@ -63,13 +63,21 @@ func orderInbounds(j row) ([]string, error) {
 	return ids, nil
 }
 
-func (m *orderManager) preflight(j row) error {
-	ctx, s := m.ctx, m.a.s
+func (m *orderManager) enrollmentOrigin() (*url.URL, error) {
 	base, err := url.Parse(m.a.config.PublicOrigin)
 	if err != nil || base.Scheme != "https" || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
-		return errors.New("укажите доступный по HTTPS PUBLIC_ORIGIN для регистрации SSH-ключа сервера")
+		return nil, errors.New("укажите доступный по HTTPS PUBLIC_ORIGIN для регистрации SSH-ключа сервера")
 	}
-	if err = m.installer.ReadyForOrder(orderNode(j)); err != nil {
+	return base, nil
+}
+
+func (m *orderManager) preflight(j row) error {
+	ctx, s := m.ctx, m.a.s
+	base, err := m.enrollmentOrigin()
+	if err != nil {
+		return err
+	}
+	if err = m.installer.ReadyForOrder(ctx, orderNode(j)); err != nil {
 		return err
 	}
 	key, err := m.installer.loginPublicKey(ctx)

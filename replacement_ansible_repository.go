@@ -35,6 +35,8 @@ func (a *replacementAnsible) readyRepository(order bool) error {
 	}
 	if !order {
 		files = append(files, "inventory/hosts.yml")
+	} else if a.repoDir == bundledReplacementAnsibleDir {
+		files = append(files, "files/nodes/docker-compose.yml")
 	}
 	for _, name := range files {
 		info, err := os.Stat(filepath.Join(a.repoDir, name))
@@ -110,7 +112,11 @@ become = true
 	if order != nil && group != order.Group {
 		return errors.New("new node Ansible inventory must retain the requested group")
 	}
+	bundledOrder := order != nil && a.repoDir == bundledReplacementAnsibleDir
 	hostVars := make(map[string]any)
+	if bundledOrder {
+		hostVars = a.bundledOrderVars(group)
+	}
 	for _, values := range []map[string]json.RawMessage{inventoryVars, nodeVars} {
 		for name, value := range values {
 			if replacementRepositoryVariable(name) {
@@ -125,9 +131,12 @@ become = true
 		hostVars["stack_node_secret_key"] = json.RawMessage(secret)
 		hostVars["stack_node_port"] = orderRemnawaveNodePort
 		delete(hostVars, "stack_nodes_env_content")
-		if a.repoDir == bundledReplacementAnsibleDir {
+		if bundledOrder {
 			// The bundled roles omit the upstream's deployment-specific Alloy configuration.
 			hostVars["common_alloy_enabled"] = false
+			if err := validateBundledOrderVars(hostVars, group); err != nil {
+				return err
+			}
 		}
 	}
 	if err := validateReplacementRepositoryVars(hostVars, group); err != nil {
@@ -279,12 +288,32 @@ func replacementRepositoryVariable(name string) bool {
 	return true
 }
 
-func validateReplacementRepositoryVars(vars map[string]any, group string) error {
-	value := func(name string) (value string) {
-		raw, _ := vars[name].(json.RawMessage)
-		_ = json.Unmarshal(raw, &value)
-		return strings.TrimSpace(value)
+func replacementVarString(vars map[string]any, name string) (value string) {
+	raw, _ := vars[name].(json.RawMessage)
+	_ = json.Unmarshal(raw, &value)
+	return strings.TrimSpace(value)
+}
+
+func replacementUsesCertbot(vars map[string]any) bool {
+	certbot, _ := vars["nodes_certbot_enabled"].(json.RawMessage)
+	switch strings.ToLower(strings.Trim(string(certbot), `"`)) {
+	case "true", "yes", "on", "1":
+		provider := replacementVarString(vars, "ssl_provider")
+		return provider == "" || provider == "certbot"
 	}
+	return false
+}
+
+func validReplacementXHTTPUpstream(upstream string) bool {
+	if !replacementNodeXHTTPUpstream.MatchString(upstream) {
+		return false
+	}
+	port, _ := strconv.Atoi(strings.TrimPrefix(upstream, "127.0.0.1:"))
+	return port >= 1 && port <= 65535
+}
+
+func validateReplacementRepositoryVars(vars map[string]any, group string) error {
+	value := func(name string) string { return replacementVarString(vars, name) }
 	for _, name := range []string{"stack_project_src", "stack_files_src", "nginx_node_domain", "ssl_fullchain_path", "ssl_privkey_path"} {
 		if value(name) == "" {
 			return fmt.Errorf("replacement Ansible inventory requires %s for the selected host", name)
@@ -313,24 +342,20 @@ func validateReplacementRepositoryVars(vars map[string]any, group string) error 
 		if !strings.Contains(path, "{{") && !replacementNodeXHTTPPath.MatchString(path) {
 			return errors.New("replacement Ansible inventory requires a valid nginx_node_xhttp_path for the selected CDN host")
 		}
-		if !strings.Contains(upstream, "{{") && !replacementNodeXHTTPUpstream.MatchString(upstream) {
+		if !strings.Contains(upstream, "{{") && !validReplacementXHTTPUpstream(upstream) {
 			return errors.New("replacement Ansible inventory requires a loopback nginx_node_xhttp_upstream for the selected CDN host")
 		}
 	}
-	certbot, _ := vars["nodes_certbot_enabled"].(json.RawMessage)
-	switch strings.ToLower(strings.Trim(string(certbot), `"`)) {
-	case "true", "yes", "on", "1":
-		if provider := value("ssl_provider"); provider == "" || provider == "certbot" {
-			for _, name := range []string{"ssl_certbot_email", "nginx_acme_webroot"} {
-				if value(name) == "" {
-					return fmt.Errorf("replacement Ansible inventory requires %s for Certbot", name)
-				}
+	if replacementUsesCertbot(vars) {
+		for _, name := range []string{"ssl_certbot_email", "nginx_acme_webroot"} {
+			if value(name) == "" {
+				return fmt.Errorf("replacement Ansible inventory requires %s for Certbot", name)
 			}
-			var domains []string
-			raw, _ := vars["ssl_certbot_domains"].(json.RawMessage)
-			if value("ssl_certbot_domains") == "" && (json.Unmarshal(raw, &domains) != nil || len(domains) == 0) {
-				return errors.New("replacement Ansible inventory requires ssl_certbot_domains for Certbot")
-			}
+		}
+		var domains []string
+		raw, _ := vars["ssl_certbot_domains"].(json.RawMessage)
+		if value("ssl_certbot_domains") == "" && (json.Unmarshal(raw, &domains) != nil || len(domains) == 0) {
+			return errors.New("replacement Ansible inventory requires ssl_certbot_domains for Certbot")
 		}
 	}
 	return nil

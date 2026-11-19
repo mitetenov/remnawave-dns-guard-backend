@@ -30,7 +30,7 @@ type orderSelection struct {
 
 type orderInstaller interface {
 	checkOrderConfiguration(context.Context) error
-	ReadyForOrder(orderAnsibleNode) error
+	ReadyForOrder(context.Context, orderAnsibleNode) error
 	RunOrder(context.Context, string, string, orderAnsibleNode) error
 	loginPublicKey(context.Context) (string, error)
 }
@@ -142,10 +142,16 @@ func orderPlanChoice(zone string, p orderCloudPlan) orderChoice {
 	}
 }
 
-func (m *orderManager) options(ctx context.Context, kind, zone, poolID string) ([]orderChoice, error) {
+func (m *orderManager) options(ctx context.Context, kind, zone, poolID, group string) ([]orderChoice, error) {
 	choices := []orderChoice{}
 	switch kind {
 	case "zone", "plan":
+		if kind == "zone" {
+			_, originErr := m.enrollmentOrigin()
+			if err := errors.Join(originErr, m.installer.checkOrderConfiguration(ctx)); err != nil {
+				return nil, err
+			}
+		}
 		c, err := m.cloud()
 		if err != nil {
 			return nil, err
@@ -175,6 +181,11 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID string) (
 	case "group":
 		choices = []orderChoice{{ID: "nodes", Label: "Обычная нода (nodes)"}, {ID: "nodes_wl", Label: "Нода за CDN (nodes_wl)"}}
 	case "profile":
+		if group != "" {
+			if err := m.checkOrderGroup(ctx, group); err != nil {
+				return nil, err
+			}
+		}
 		r, err := m.a.remnawaveProvider()
 		if err != nil {
 			return nil, err
@@ -250,6 +261,14 @@ func (m *orderManager) selectedPlan(ctx context.Context, zone, quote string) (or
 	return orderCloudPlan{}, errOrderQuoteChanged
 }
 
+func (m *orderManager) checkOrderGroup(ctx context.Context, group string) error {
+	if !oneOf(group, "nodes", "nodes_wl") {
+		return errors.New("выберите тип ноды")
+	}
+	node := orderAnsibleNode{Alias: "dns-guard-preflight", Group: group, Domain: "node.invalid"}
+	return m.installer.ReadyForOrder(ctx, node)
+}
+
 func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSelection) (string, error) {
 	requestID, ok := canonicalUUID(requestID)
 	if !ok || !upCloudOrderZonePattern.MatchString(sel.Zone) || !oneOf(sel.Group, "nodes", "nodes_wl") {
@@ -264,7 +283,10 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 	if prev != nil {
 		return matchOrderRequest(prev, sel)
 	}
-	if err := m.installer.checkOrderConfiguration(ctx); err != nil {
+	if _, err := m.enrollmentOrigin(); err != nil {
+		return "", err
+	}
+	if err := m.checkOrderGroup(ctx, sel.Group); err != nil {
 		return "", err
 	}
 	plan, err := m.selectedPlan(ctx, sel.Zone, sel.Plan)

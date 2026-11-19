@@ -20,17 +20,20 @@ const (
 	replacementAnsibleEnv        = "REPLACEMENT_ANSIBLE_"
 	bundledReplacementAnsibleDir = "/opt/dns-guard/ansible"
 	defaultOrderGroupVarsDir     = "/run/dns-guard/replacement/group_vars"
+	defaultOrderSSHKey           = "/run/dns-guard/replacement/ssh_key"
 )
 
 var replacementSSHUser = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$`)
 var replacementListedHost = regexp.MustCompile(`(?m)^[\t ]+hosts \(1\):\r?\n[\t ]+replacement[\t ]*\r?$`)
 
 type replacementAnsible struct {
-	installPlaybook, tuningPlaybook string
-	repoDir                         string
-	orderGroupVarsDir               string
-	sshUser, sshKey, knownHosts     string
-	nodeVarsDir, timeout            string
+	installPlaybook, tuningPlaybook   string
+	repoDir                           string
+	orderGroupVarsDir                 string
+	orderCertbotEmail, orderXHTTPPath string
+	orderXHTTPUpstream                string
+	sshUser, sshKey, knownHosts       string
+	nodeVarsDir, timeout              string
 }
 
 func newReplacementAnsible() *replacementAnsible {
@@ -62,12 +65,12 @@ func newOrderAnsible() *replacementAnsible {
 	if a.repoDir == "" {
 		a.repoDir = bundledReplacementAnsibleDir
 	}
-	if a.orderGroupVarsDir == "" {
-		a.orderGroupVarsDir = filepath.Join(a.repoDir, "inventory", "group_vars")
-		if a.repoDir == bundledReplacementAnsibleDir {
-			a.orderGroupVarsDir = defaultOrderGroupVarsDir
-		}
+	if a.sshKey == "" {
+		a.sshKey = defaultOrderSSHKey
 	}
+	a.orderCertbotEmail = strings.TrimSpace(os.Getenv(replacementAnsibleEnv + "CERTBOT_EMAIL"))
+	a.orderXHTTPPath = strings.TrimSpace(os.Getenv(replacementAnsibleEnv + "XHTTP_PATH"))
+	a.orderXHTTPUpstream = strings.TrimSpace(os.Getenv(replacementAnsibleEnv + "XHTTP_UPSTREAM"))
 	return a
 }
 
@@ -108,9 +111,8 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Durati
 		files = []requiredFile{{"INSTALL_PLAYBOOK", a.installPlaybook}, {"TUNING_PLAYBOOK", a.tuningPlaybook}}
 	}
 	if order {
-		info, err := os.Stat(a.orderGroupVarsDir)
-		if !filepath.IsAbs(a.orderGroupVarsDir) || err != nil || !info.IsDir() {
-			return 0, fmt.Errorf("подключите каталог настроек нод %s или задайте REPLACEMENT_ANSIBLE_GROUP_VARS_DIR", a.orderGroupVarsDir)
+		if _, err := a.orderGroupVars(); err != nil {
+			return 0, err
 		}
 	}
 	if !order {
@@ -120,6 +122,9 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Durati
 	for _, file := range files {
 		info, err := os.Stat(file.path)
 		if !filepath.IsAbs(file.path) || err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			if order && file.name == "SSH_KEY" {
+				return 0, errors.New("подключите приватный SSH-ключ для заказов через replacement/ssh_key и docker-compose.replacements.yaml или задайте REPLACEMENT_ANSIBLE_SSH_KEY с путём внутри backend")
+			}
 			return 0, fmt.Errorf("%s%s must point to a nonempty regular file using an absolute path", replacementAnsibleEnv, file.name)
 		}
 		f, err := os.Open(file.path)
