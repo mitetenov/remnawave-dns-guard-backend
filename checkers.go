@@ -152,15 +152,16 @@ func (v probeSnapshot) summary(target row) probeSummary {
 func (s *Store) refreshProbeTargets() {
 	view := s.probeSnapshot()
 	for _, target := range s.all("SELECT * FROM targets") {
-		s.cacheProbeTarget(target, view.summary(target))
+		s.cacheProbeTarget(target, view.pools[str(target["pool_id"])], view.summary(target))
 	}
 }
 
-func (s *Store) cacheProbeTarget(target row, summary probeSummary) row {
+func (s *Store) cacheProbeTarget(target, pool row, summary probeSummary) row {
 	value := summary.project(target)
 	if target["status"] != value["status"] || num(target["failures"]) != num(value["failures"]) || num(target["successes"]) != num(value["successes"]) || target["last_checked_at"] != value["last_checked_at"] || target["last_error"] != value["last_error"] || target["last_latency_ms"] != value["last_latency_ms"] || target["last_agent_id"] != value["last_agent_id"] {
 		s.exec("UPDATE targets SET status=?,failures=?,successes=?,last_checked_at=?,last_latency_ms=?,last_error=?,last_agent_id=? WHERE id=?", value["status"], value["failures"], value["successes"], value["last_checked_at"], value["last_latency_ms"], value["last_error"], value["last_agent_id"], target["id"])
 	}
+	s.observeReplacement(value, pool, summary, nowSeconds())
 	return value
 }
 
@@ -217,7 +218,7 @@ func (a *App) pollChecker(data Poll) []row {
 	// Newly registered checkers and newly enrolled targets need no setup in Guard.
 	s.exec("INSERT OR IGNORE INTO target_checks (target_id,agent_id) SELECT targets.id,? FROM targets JOIN pools ON pools.id=targets.pool_id WHERE manual_enabled=1 AND profile IS NOT NULL", data.AgentID)
 	capacity := 4 - int(num(s.one("SELECT COUNT(*) n FROM jobs WHERE agent_id=? AND consumed=0", data.AgentID)["n"]))
-	for _, target := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id JOIN target_checks c ON c.target_id=targets.id AND c.agent_id=? WHERE manual_enabled=1 AND profile IS NOT NULL AND c.next_due<=? AND (dns_action IS NULL OR dns_action!='replace_ip') AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND agent_id=? AND consumed=0) ORDER BY c.next_due,targets.id", data.AgentID, now, data.AgentID) {
+	for _, target := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id JOIN target_checks c ON c.target_id=targets.id AND c.agent_id=? WHERE manual_enabled=1 AND profile IS NOT NULL AND c.next_due<=? AND (dns_action IS NULL OR dns_action!='replace_ip') AND NOT EXISTS (SELECT 1 FROM replacement_jobs r WHERE r.target_id=targets.id AND r.stage IN ('retire','provision','ansible','remnawave')) AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND agent_id=? AND consumed=0) ORDER BY c.next_due,targets.id", data.AgentID, now, data.AgentID) {
 		if len(jobs) >= capacity {
 			break
 		}
@@ -272,9 +273,11 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 		checks[str(check["agent_id"])] = check
 	}
 	summary := summarizeProbes(pool, s.all("SELECT * FROM agents ORDER BY id"), checks, nowSeconds())
-	target = s.cacheProbeTarget(target, summary)
+	target = s.cacheProbeTarget(target, pool, summary)
+	replacement := s.activeReplacement(target["id"])
+	replacementOwnsDNS := replacement != nil && !oneOf(str(replacement["stage"]), "preflight", "cleanup")
 	manualPending := target["dns_action"] != nil && !strings.HasPrefix(str(target["dns_action"]), "auto_")
-	if truth(pool["automation_enabled"]) && !manualPending {
+	if truth(pool["automation_enabled"]) && !manualPending && !replacementOwnsDNS {
 		if summary.Restore && truth(target["dns_present"]) && truth(pool["remnawave_host_disabled"]) {
 			s.exec("UPDATE pools SET remnawave_next_check=0 WHERE id=?", pool["id"])
 			a.reconciler.signal()

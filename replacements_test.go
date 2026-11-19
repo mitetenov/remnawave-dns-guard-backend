@@ -3,6 +3,7 @@ package guard
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -99,5 +100,50 @@ func TestReplacementTiming(t *testing.T) {
 	}
 	if got := replacementRecordTTL(records, "9.9.9.9", 120); got != 0 {
 		t.Fatal("unrelated record", got)
+	}
+}
+
+func TestProbeRefreshStartsResetsAndSchedulesReplacement(t *testing.T) {
+	a, err := New(testConfig(filepath.Join(t.TempDir(), "guard.db")), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	s := a.s
+	poolID, targetID, agentID := uid(), uid(), uid()
+	now := nowSeconds()
+	checked := iso(fromSeconds(now))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exec(`INSERT INTO pools(id,name,hostname,ttl,interval_seconds,failure_threshold,recovery_threshold,automation_enabled,revision,created_at)
+VALUES(?, 'pool', 'pool.example', 300, 60, 1, 1, 1, 1, ?)`, poolID, checked)
+	s.exec(`INSERT INTO targets(id,pool_id,name,ip,manual_enabled,status,dns_present,dns_uncertain,last_checked_at)
+VALUES(?,?, 'node', '198.51.100.1', 1, 'excluded', 0, 0, ?)`, targetID, poolID, checked)
+	s.exec(`INSERT INTO agents(id,last_seen,healthy,version,direct_enabled,socks5_enabled) VALUES(?,?,1,'1.0.0',1,0)`, agentID, now)
+	s.exec(`INSERT INTO target_checks(target_id,agent_id,next_due,failures,successes,last_checked_at,last_error,outcome)
+VALUES(?,?,0,1,0,?,'probe_failed',0)`, targetID, agentID, checked)
+	s.exec(`INSERT INTO replacement_bindings(target_id,provider,server_uuid,node_uuid,enabled) VALUES(?, 'upcloud', 'server-1', 'node-1', 1)`, targetID)
+
+	s.refreshProbeTargets()
+	binding := s.one("SELECT blocked_since FROM replacement_bindings WHERE target_id=?", targetID)
+	if binding == nil || binding["blocked_since"] == nil {
+		t.Fatal("fresh blocked probe did not start the replacement timer")
+	}
+
+	s.exec("UPDATE target_checks SET last_checked_at=? WHERE target_id=?", iso(fromSeconds(now-300)), targetID)
+	s.refreshProbeTargets()
+	binding = s.one("SELECT blocked_since FROM replacement_bindings WHERE target_id=?", targetID)
+	if binding == nil || binding["blocked_since"] != nil {
+		t.Fatal("stale blocked evidence did not reset the replacement timer")
+	}
+
+	s.exec("UPDATE target_checks SET last_checked_at=? WHERE target_id=?", iso(fromSeconds(nowSeconds())), targetID)
+	s.refreshProbeTargets()
+	s.exec("UPDATE replacement_bindings SET blocked_since=? WHERE target_id=?", nowSeconds()-replacementDelay.Seconds()-1, targetID)
+	s.refreshProbeTargets()
+	jobs := s.all("SELECT id,stage FROM replacement_jobs WHERE target_id=?", targetID)
+	if len(jobs) != 1 || jobs[0]["stage"] != "preflight" {
+		t.Fatalf("due blocked target should schedule exactly one preflight job: %#v", jobs)
 	}
 }

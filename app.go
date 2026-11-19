@@ -363,6 +363,7 @@ func (a *App) manualDNSLocked(id, action string) any {
 	a.s.mu.Lock()
 	func() {
 		defer a.s.mu.Unlock()
+		a.s.requireIdleReplacement(id)
 		if a.target(id)["dns_action"] == "replace_ip" {
 			fail(409, "Дождитесь завершения смены IP узла")
 		}

@@ -14,7 +14,7 @@ func (r *Remnawave) checkReplacementNode(job row, update bool) error {
 	for _, node := range nodes {
 		if !strings.EqualFold(str(node["uuid"]), str(job["node_uuid"])) {
 			if node["address"] == job["old_ip"] || node["address"] == job["new_ip"] {
-				return errors.New("Этот адрес используется другой нодой Remnawave")
+				return errors.New("этот адрес используется другой нодой Remnawave")
 			}
 			continue
 		}
@@ -27,7 +27,7 @@ func (r *Remnawave) checkReplacementNode(job row, update bool) error {
 		}
 	}
 	if !found {
-		return errors.New("Привязанная нода не найдена в Remnawave")
+		return errors.New("привязанная нода не найдена в Remnawave")
 	}
 	if !update {
 		return nil

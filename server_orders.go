@@ -52,7 +52,7 @@ var orderStages = map[string]string{
 	"complete": "Готово", "cancelled": "Отменён", "rejected": "Провайдер отклонил заказ",
 }
 
-var errOrderQuoteChanged = errors.New("Тариф, его цена или характеристики изменились. Выберите актуальный тариф и подтвердите новый заказ")
+var errOrderQuoteChanged = errors.New("тариф, его цена или характеристики изменились. Выберите актуальный тариф и подтвердите новый заказ")
 
 const orderActive = "stage NOT IN ('complete','cancelled','rejected')"
 

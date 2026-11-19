@@ -336,7 +336,7 @@ func (r *Reconciler) scanPool(poolID string, adopt bool) (int, error) {
 	s.transaction(func() {
 		if adopt {
 			for ip := range actual {
-				if publicIPv4(ip) && s.one("SELECT id FROM targets WHERE pool_id=? AND (ip=? OR dns_new_ip=?)", poolID, ip, ip) == nil {
+				if publicIPv4(ip) && !s.reservedReplacementIP(ip) && s.one("SELECT id FROM targets WHERE pool_id=? AND (ip=? OR dns_new_ip=?)", poolID, ip, ip) == nil {
 					s.exec("INSERT INTO targets (id,pool_id,name,ip) VALUES (?,?,?,?)", uid(), poolID, ip, ip)
 					added++
 				}
@@ -344,6 +344,10 @@ func (r *Reconciler) scanPool(poolID string, adopt bool) (int, error) {
 		}
 		enrolled := s.all("SELECT * FROM targets WHERE pool_id=?", poolID)
 		managed := map[string]bool{}
+		for _, job := range s.all("SELECT old_ip,new_ip FROM replacement_jobs WHERE pool_id=? AND "+replacementActive, poolID) {
+			managed[str(job["old_ip"])] = true
+			managed[str(job["new_ip"])] = true
+		}
 		for _, t := range enrolled {
 			managed[str(t["ip"])] = true
 			if ip := str(t["dns_new_ip"]); ip != "" {
