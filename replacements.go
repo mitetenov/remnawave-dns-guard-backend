@@ -132,7 +132,7 @@ func (w *replacementWorker) preflightCurrent(j row) bool {
 	s := w.a.s
 	b := s.one("SELECT * FROM replacement_bindings WHERE target_id=?", j["target_id"])
 	t := s.one("SELECT * FROM targets WHERE id=?", j["target_id"])
-	if t == nil || b == nil || !truth(b["enabled"]) || !replacementDue(b["blocked_since"], nowSeconds()) || t["ip"] != j["old_ip"] || b["server_uuid"] != j["server_uuid"] || b["node_uuid"] != j["node_uuid"] {
+	if t == nil || b == nil || !truth(b["enabled"]) || !replacementDue(b["blocked_since"], nowSeconds()) || t["ip"] != j["old_ip"] || b["provider"] != j["provider"] || b["server_uuid"] != j["server_uuid"] || b["node_uuid"] != j["node_uuid"] {
 		return false
 	}
 	view := s.probeSnapshot()
@@ -190,7 +190,7 @@ func (w *replacementWorker) retry(job row, err error) {
 			s.event("error", "system", "Автозамена: "+err.Error(), job["pool_id"], job["target_id"])
 		}
 		s.exec(`UPDATE replacement_jobs SET error=?,next_retry=?,updated_at=?,
- can_retry_create=CASE WHEN create_attempted=1 THEN ? ELSE 0 END WHERE id=?`, err.Error(), nowSeconds()+retrySeconds, iso(time.Now()), errors.Is(err, errReplacementCreateUnconfirmed), job["id"])
+ can_retry_create=CASE WHEN create_attempted=1 AND (provider!='virtua' OR (new_server_uuid IS NULL AND host_key IS NULL)) THEN ? ELSE 0 END WHERE id=?`, err.Error(), nowSeconds()+retrySeconds, iso(time.Now()), errors.Is(err, errReplacementCreateUnconfirmed), job["id"])
 	})
 }
 
@@ -210,9 +210,12 @@ func (w *replacementWorker) commit(j row, next string, change func()) {
 	})
 }
 
-func (w *replacementWorker) preflight(j row, cloud replacementProvider) error {
+func (w *replacementWorker) preflight(j row, prepare func() (json.RawMessage, string, error)) error {
 	a := w.a
-	order := w.managedOrder(j)
+	order := w.replacementOrder(j)
+	if j["provider"] == virtuaOrderProvider {
+		j["node_domain"] = order["domain"]
+	}
 	if order != nil {
 		if err := a.orders.installer.ReadyForOrder(w.ctx, orderNode(order)); err != nil {
 			return err
@@ -232,6 +235,11 @@ func (w *replacementWorker) preflight(j row, cloud replacementProvider) error {
 	if err = panel.replacementHosts(j, false); err != nil {
 		return err
 	}
+	if j["provider"] == virtuaOrderProvider {
+		if _, err = panel.orderNodeSecret(w.ctx); err != nil {
+			return err
+		}
+	}
 	dns, err := a.dnsProvider()
 	if err != nil {
 		return err
@@ -248,13 +256,13 @@ func (w *replacementWorker) preflight(j row, cloud replacementProvider) error {
 	ttl := replacementRecordTTL(records, str(j["old_ip"]), num(pool["ttl"]))
 	var originTTL float64
 	if order != nil {
-		originTTL, err = dns.checkOrderOrigin(order, str(j["old_ip"]), "", false)
+		originTTL, err = checkReplacementOrigin(dns, order, str(j["old_ip"]), "", false)
 		if err != nil {
 			return err
 		}
 		ttl = max(ttl, originTTL)
 	}
-	snapshot, err := cloud.Snapshot(w.ctx, str(j["server_uuid"]), str(j["old_ip"]), str(j["id"]))
+	snapshot, credential, err := prepare()
 	if err != nil {
 		return err
 	}
@@ -272,15 +280,22 @@ func (w *replacementWorker) preflight(j row, cloud replacementProvider) error {
 		s.setReplacementStage(j, "cancelled")
 		return nil
 	}
+	if truth(order["manual_origin"]) && s.replacementDomainUsed(j["target_id"], str(order["domain"])) {
+		return errors.New("этот домен уже используется в DNS Guard")
+	}
 	if s.one("SELECT id FROM targets WHERE id!=? AND (ip=? OR dns_new_ip=? OR lower(remnawave_uuid)=?)", j["target_id"], j["old_ip"], j["old_ip"], j["node_uuid"]) != nil {
 		return errors.New("эта нода или её IP используется ещё одной целью. Проверьте привязки перед заменой")
 	}
 	s.transaction(func() {
-		s.exec("UPDATE replacement_jobs SET snapshot=?,release_after=?,old_record_ttl=MAX(old_record_ttl,?) WHERE id=?",
-			s.cipher.encrypt(snapshot), nowSeconds()+max(num(pool["ttl"]), ttl), originTTL, j["id"])
+		s.exec("UPDATE replacement_jobs SET snapshot=?,enroll_digest=NULLIF(?,''),release_after=?,old_record_ttl=MAX(old_record_ttl,?) WHERE id=?",
+			s.cipher.encrypt(snapshot), credential, nowSeconds()+max(num(pool["ttl"]), ttl), originTTL, j["id"])
 		s.exec("UPDATE replacement_bindings SET blocked_since=NULL WHERE target_id=?", j["target_id"])
 		s.exec("UPDATE jobs SET consumed=1 WHERE target_id=?", j["target_id"])
-		s.setReplacementStage(j, "retire")
+		stage := "retire"
+		if j["provider"] == virtuaOrderProvider {
+			stage = "provision"
+		}
+		s.setReplacementStage(j, stage)
 	})
 	return nil
 }
@@ -297,6 +312,9 @@ func (w *replacementWorker) step(j row) error {
 				return nil
 			}
 		}
+		if j["provider"] == virtuaOrderProvider {
+			return w.stepVirtua(j)
+		}
 		adapter, ok := w.providers[str(j["provider"])]
 		if !ok {
 			return errors.New("провайдер автозамены недоступен")
@@ -306,9 +324,14 @@ func (w *replacementWorker) step(j row) error {
 			return err
 		}
 		if stage == "preflight" {
-			return w.preflight(j, cloud)
+			return w.preflight(j, func() (json.RawMessage, string, error) {
+				snapshot, err := cloud.Snapshot(w.ctx, str(j["server_uuid"]), str(j["old_ip"]), str(j["id"]))
+				return snapshot, "", err
+			})
 		}
 		return w.changeServer(j, cloud)
+	case "enrollment":
+		return w.stepVirtua(j)
 	case "ansible":
 		if err := w.installReplacement(j); err != nil {
 			return err
@@ -337,9 +360,12 @@ func (w *replacementWorker) managedOrder(j row) row {
 
 func (w *replacementWorker) installReplacement(j row) error {
 	oldIP, newIP, nodeID := str(j["old_ip"]), str(j["new_ip"]), str(j["node_uuid"])
-	order := w.managedOrder(j)
+	order := w.replacementOrder(j)
 	if order == nil {
 		return w.ansible.Run(w.ctx, newIP, nodeID)
+	}
+	if j["provider"] == virtuaOrderProvider {
+		order["host_key"] = j["host_key"]
 	}
 	a := w.a
 	dns, err := a.dnsProvider()
@@ -349,7 +375,12 @@ func (w *replacementWorker) installReplacement(j row) error {
 	err = func() error {
 		a.reconciler.dnsMu.Lock()
 		defer a.reconciler.dnsMu.Unlock()
-		ttl, err := dns.checkOrderOrigin(order, oldIP, newIP, false)
+		if truth(order["manual_origin"]) && a.withStore(func() any {
+			return a.s.replacementDomainUsed(j["target_id"], str(order["domain"]))
+		}).(bool) {
+			return errors.New("этот домен уже используется в DNS Guard")
+		}
+		ttl, err := checkReplacementOrigin(dns, order, oldIP, newIP, false)
 		if err != nil {
 			return err
 		}
@@ -359,7 +390,7 @@ func (w *replacementWorker) installReplacement(j row) error {
 			a.s.exec("UPDATE replacement_jobs SET old_record_ttl=MAX(old_record_ttl,?) WHERE id=?", ttl, j["id"])
 			return nil
 		})
-		ttl, err = dns.checkOrderOrigin(order, oldIP, newIP, true)
+		ttl, err = checkReplacementOrigin(dns, order, oldIP, newIP, true)
 		if err != nil {
 			return err
 		}
@@ -420,51 +451,66 @@ func (w *replacementWorker) changeServer(j row, cloud replacementProvider) error
 			s.exec("UPDATE replacement_jobs SET new_server_uuid=?,new_ip=? WHERE id=?", server, ip, j["id"])
 		})
 	case "cleanup":
-		// Cached answers can still point to the old VM after Cloudflare has
-		// confirmed the authoritative change. Keep the address in our account.
-		if num(j["release_after"]) > nowSeconds() {
-			return nil
-		}
-		dns, err := w.a.dnsProvider()
-		if err != nil {
-			return err
-		}
-		if order := w.managedOrder(j); order != nil {
-			w.a.reconciler.dnsMu.Lock()
-			defer w.a.reconciler.dnsMu.Unlock()
-			if _, err := dns.checkOrderOrigin(order, "", str(j["new_ip"]), false); err != nil {
-				return err
-			}
-		}
-		var pool row
-		w.a.withStore(func() any { pool = w.a.pool(str(j["pool_id"])); return nil })
-		records, err := dns.addressRecords(pool)
-		if err != nil {
-			return err
-		}
-		if err = checkProxy(records); err != nil {
-			return err
-		}
-		if ttl := replacementRecordTTL(records, oldIP, num(pool["ttl"])); ttl > 0 {
-			w.a.withStore(func() any {
-				s.exec("UPDATE replacement_jobs SET release_after=? WHERE id=?", nowSeconds()+ttl, j["id"])
-				return nil
-			})
-			return errors.New("прежний IP снова присутствует в DNS. Проверьте запись перед освобождением адреса")
-		}
-		if err = cloud.ReleaseOldIP(w.ctx, snapshot, str(j["new_server_uuid"]), str(j["new_ip"]), oldIP); err != nil {
-			return err
-		}
-		w.commit(j, "complete", func() {
-			s.exec("UPDATE replacement_bindings SET server_uuid=?,blocked_since=NULL WHERE target_id=?", j["new_server_uuid"], j["target_id"])
-			s.exec("UPDATE replacement_jobs SET snapshot=NULL WHERE id=?", j["id"])
+		return w.cleanup(j, func() error {
+			return cloud.ReleaseOldIP(w.ctx, snapshot, str(j["new_server_uuid"]), str(j["new_ip"]), oldIP)
 		})
 	}
 	return nil
 }
 
+func (w *replacementWorker) cleanup(j row, release func() error) error {
+	if num(j["release_after"]) > nowSeconds() {
+		return nil
+	}
+	a, s := w.a, w.a.s
+	a.reconciler.dnsMu.Lock()
+	defer a.reconciler.dnsMu.Unlock()
+	dns, err := a.dnsProvider()
+	if err != nil {
+		return err
+	}
+	if order := w.replacementOrder(j); order != nil {
+		if j["provider"] == virtuaOrderProvider {
+			j["node_domain"] = order["domain"]
+		}
+		if _, err = checkReplacementOrigin(dns, order, "", str(j["new_ip"]), false); err != nil {
+			return err
+		}
+	}
+	var pool row
+	a.withStore(func() any { pool = a.pool(str(j["pool_id"])); return nil })
+	records, err := dns.addressRecords(pool)
+	if err != nil {
+		return err
+	}
+	if err = checkProxy(records); err != nil {
+		return err
+	}
+	if ttl := replacementRecordTTL(records, str(j["old_ip"]), num(pool["ttl"])); ttl > 0 {
+		a.withStore(func() any {
+			s.exec("UPDATE replacement_jobs SET release_after=? WHERE id=?", nowSeconds()+ttl, j["id"])
+			return nil
+		})
+		return errors.New("прежний IP снова присутствует в DNS")
+	}
+	if j["provider"] == virtuaOrderProvider && replacementRecordTTL(records, str(j["new_ip"]), num(pool["ttl"])) == 0 {
+		return errors.New("в DNS-пуле отсутствует новый IP сервера Virtua.Cloud")
+	}
+	if err = release(); err != nil {
+		return err
+	}
+	w.commit(j, "complete", func() {
+		s.exec("UPDATE replacement_bindings SET server_uuid=?,blocked_since=NULL WHERE target_id=?", j["new_server_uuid"], j["target_id"])
+		s.exec("UPDATE replacement_jobs SET snapshot=NULL,enroll_digest=NULL WHERE id=?", j["id"])
+	})
+	return nil
+}
+
 func (w *replacementWorker) moveNode(j row) error {
 	a, s := w.a, w.a.s
+	if j["provider"] == virtuaOrderProvider {
+		j["node_domain"] = w.replacementOrder(j)["domain"]
+	}
 	panel, err := a.remnawaveProvider()
 	if err != nil {
 		return err
@@ -493,6 +539,10 @@ func (w *replacementWorker) moveNode(j row) error {
 
 func (w *replacementWorker) publish(j row) error {
 	a, s := w.a, w.a.s
+	order := w.replacementOrder(j)
+	if j["provider"] == virtuaOrderProvider {
+		j["node_domain"] = order["domain"]
+	}
 	a.reconciler.dnsMu.Lock()
 	defer a.reconciler.dnsMu.Unlock()
 	if !w.recovered(j) {
@@ -513,8 +563,8 @@ func (w *replacementWorker) publish(j row) error {
 	if err != nil {
 		return err
 	}
-	if order := w.managedOrder(j); order != nil {
-		if _, err := dns.checkOrderOrigin(order, "", str(j["new_ip"]), false); err != nil {
+	if order != nil {
+		if _, err := checkReplacementOrigin(dns, order, "", str(j["new_ip"]), false); err != nil {
 			return err
 		}
 	}

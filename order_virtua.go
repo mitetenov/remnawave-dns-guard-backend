@@ -80,6 +80,9 @@ func (c *virtuaOrder) request(ctx context.Context, method, path string, input ur
 		return nil, integration("нет ответа от API Virtua.Cloud")
 	}
 	defer resp.Body.Close()
+	if method == http.MethodDelete && resp.StatusCode == http.StatusNoContent && output == nil {
+		return resp.Header, nil
+	}
 	const maxReply = 8 << 20
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxReply+1))
 	if err != nil || len(data) > maxReply {
@@ -409,19 +412,38 @@ func (c *virtuaOrder) findServer(ctx context.Context, name string) (string, erro
 }
 
 func (c *virtuaOrder) readyAddress(ctx context.Context, id string) (string, error) {
-	var details struct {
-		Server virtuaServer `json:"cloud_server"`
-	}
-	if _, err := c.request(ctx, http.MethodGet, "/cloud-server/"+id, nil, &details); err != nil {
+	server, err := c.server(ctx, id)
+	if err != nil {
 		return "", err
 	}
-	server := details.Server
-	if returned, ok := canonicalUUID(server.ID); !ok || returned != id || server.Setup == nil || server.Processing == nil {
+	if server.Setup == nil || server.Processing == nil {
 		return "", integration("Virtua.Cloud вернул неполные сведения о сервере")
 	}
 	if !*server.Setup || *server.Processing || server.Status != "running" {
 		return "", errReplacementPending
 	}
+	ip, err := c.publicAddress(ctx, id)
+	if err == nil && ip == "" {
+		return "", errReplacementPending
+	}
+	return ip, err
+}
+
+func (c *virtuaOrder) server(ctx context.Context, id string) (virtuaServer, error) {
+	var details struct {
+		Server virtuaServer `json:"cloud_server"`
+	}
+	if _, err := c.request(ctx, http.MethodGet, "/cloud-server/"+id, nil, &details); err != nil {
+		return virtuaServer{}, err
+	}
+	server := details.Server
+	if returned, ok := canonicalUUID(server.ID); !ok || returned != id {
+		return virtuaServer{}, integration("Virtua.Cloud вернул неполные сведения о сервере")
+	}
+	return server, nil
+}
+
+func (c *virtuaOrder) publicAddress(ctx context.Context, id string) (string, error) {
 	var addresses struct {
 		IPs []struct {
 			Address string `json:"address"`
@@ -435,13 +457,10 @@ func (c *virtuaOrder) readyAddress(ctx context.Context, id string) (string, erro
 	for _, address := range addresses.IPs {
 		if address.Version == 4 && publicIPv4(address.Address) {
 			if ip != "" && ip != address.Address {
-				return "", errors.New("Virtua.Cloud вернул несколько публичных IPv4 для нового сервера")
+				return "", errors.New("Virtua.Cloud вернул несколько публичных IPv4 для сервера")
 			}
 			ip = address.Address
 		}
-	}
-	if ip == "" {
-		return "", errReplacementPending
 	}
 	return ip, nil
 }

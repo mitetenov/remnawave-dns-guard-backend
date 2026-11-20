@@ -152,6 +152,11 @@ func (a *App) orderRoutes() {
 		}
 		return a.withStore(func() any {
 			j := a.s.one("SELECT id,stage,create_attempted,enroll_digest,host_key FROM server_orders WHERE id=?", r.PathValue("id"))
+			table := "server_orders"
+			if j == nil {
+				table = "replacement_jobs"
+				j = a.s.one("SELECT id,stage,create_attempted,enroll_digest,host_key FROM replacement_jobs WHERE id=? AND provider='virtua'", r.PathValue("id"))
+			}
 			if !truth(j["create_attempted"]) || !constantEqual(str(j["enroll_digest"]), digest(token)) {
 				fail(401, "Invalid enrollment credential")
 			}
@@ -163,7 +168,7 @@ func (a *App) orderRoutes() {
 				if !oneOf(str(j["stage"]), "provision", "enrollment") {
 					fail(409, "Enrollment is closed")
 				}
-				a.s.exec("UPDATE server_orders SET host_key=?,next_retry=0,can_retry_create=0 WHERE id=?", data.Key, j["id"])
+				a.s.exec("UPDATE "+table+" SET host_key=?,next_retry=0,can_retry_create=0 WHERE id=?", data.Key, j["id"])
 			}
 			return row{"ok": true}
 		})
