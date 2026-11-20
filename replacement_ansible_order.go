@@ -22,7 +22,10 @@ type orderAnsibleNode struct {
 
 var replacementOrderDomainLabel = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
 
-const replacementOrderCheckID = "00000000-0000-4000-8000-000000000000"
+const (
+	replacementOrderCheckID = "00000000-0000-4000-8000-000000000000"
+	replacementLoginKeyEnv  = replacementAnsibleEnv + "SSH_KEY_BASE64"
+)
 
 func (a *replacementAnsible) checkOrderConfiguration(ctx context.Context) error {
 	_, readyErr := a.ready(ctx, true)
@@ -201,11 +204,41 @@ func (a *replacementAnsible) prepareOrderInventory(work string, node orderAnsibl
 	return path, nil
 }
 
+func (a *replacementAnsible) loginKeySetting() string {
+	if a.sshKeyBase64 != "" {
+		return replacementLoginKeyEnv
+	}
+	return replacementAnsibleEnv + "SSH_KEY"
+}
+
+func (a *replacementAnsible) stageLoginKey(path string) error {
+	if a.sshKeyBase64 == "" {
+		if err := os.Symlink(a.sshKey, path); err != nil {
+			return errors.New("cannot prepare replacement Ansible SSH identity")
+		}
+		return nil
+	}
+	const keyLimit = 64 << 10
+	invalidKey := errors.New("REPLACEMENT_ANSIBLE_SSH_KEY_BASE64 must contain a base64-encoded private SSH key")
+	if len(a.sshKeyBase64) > base64.StdEncoding.EncodedLen(keyLimit) {
+		return invalidKey
+	}
+	key, err := base64.StdEncoding.Strict().DecodeString(a.sshKeyBase64)
+	defer clear(key)
+	if err != nil || len(key) == 0 || len(key) > keyLimit {
+		return invalidKey
+	}
+	if err := os.WriteFile(path, key, 0o600); err != nil {
+		return errors.New("cannot prepare replacement Ansible SSH identity")
+	}
+	return nil
+}
+
 func (a *replacementAnsible) loginPublicKey(ctx context.Context) (string, error) {
 	if a == nil || !replacementAnsibleSupported {
 		return "", errors.New("replacement Ansible runner is unavailable")
 	}
-	if !filepath.IsAbs(a.sshKey) {
+	if a.sshKeyBase64 == "" && !filepath.IsAbs(a.sshKey) {
 		return "", errors.New("REPLACEMENT_ANSIBLE_SSH_KEY must point to an absolute path")
 	}
 	output, err := a.readLoginPublicKey(ctx)
@@ -215,15 +248,27 @@ func (a *replacementAnsible) loginPublicKey(ctx context.Context) (string, error)
 	if key, ok := replacementPublicKeyFields(string(output)); ok {
 		return key, nil
 	}
-	return "", errors.New("cannot read the public SSH login key from REPLACEMENT_ANSIBLE_SSH_KEY")
+	return "", fmt.Errorf("cannot read the public SSH login key from %s", a.loginKeySetting())
 }
 
 func (a *replacementAnsible) readLoginPublicKey(ctx context.Context) ([]byte, error) {
+	path := a.sshKey
+	if a.sshKeyBase64 != "" {
+		work, err := os.MkdirTemp("/tmp", "dns-guard-login-key-")
+		if err != nil {
+			return nil, errors.New("cannot create a temporary SSH key directory")
+		}
+		defer os.RemoveAll(work)
+		path = filepath.Join(work, "login_key")
+		if err := a.stageLoginKey(path); err != nil {
+			return nil, err
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	cmd := replacementCommand(ctx, "ssh-keygen", "-y", "-P", "", "-f", a.sshKey)
+	cmd := replacementCommand(ctx, "ssh-keygen", "-y", "-P", "", "-f", path)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
-	keyError := errors.New("REPLACEMENT_ANSIBLE_SSH_KEY must contain a usable unencrypted private key")
+	keyError := fmt.Errorf("%s must contain a usable unencrypted private key", a.loginKeySetting())
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, keyError
