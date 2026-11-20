@@ -31,7 +31,7 @@ func serverOrderError(err error) {
 func (a *App) orderRoutes() {
 	a.route("GET /api/server-orders", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
-			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,pool_hostname,group_name,profile_name,create_attempted,can_retry_create
+			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,create_attempted,can_retry_create
  FROM server_orders WHERE ` + orderActive + ` OR id IN (SELECT id FROM server_orders ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC`)
 			for _, j := range jobs {
 				j["can_cancel"] = orderStageCancellable(j)
@@ -39,14 +39,29 @@ func (a *App) orderRoutes() {
 				delete(j, "create_attempted")
 			}
 			pools := a.s.all(`SELECT p.id,p.name,p.hostname,COALESCE(t.domain_template,'') AS domain_template FROM pools p LEFT JOIN server_order_templates t ON p.id=t.pool_id ORDER BY p.name,p.hostname`)
-			return row{"orders": jobs, "pools": pools, "stages": orderStages}
+			return row{"orders": jobs, "pools": pools, "stages": orderStages, "virtua_configured": a.s.get("virtua_token") != ""}
 		})
 	})
 	a.route("GET /api/server-orders/options", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		query := r.URL.Query()
-		choices, err := a.orders.options(r.Context(), query.Get("kind"), query.Get("zone"), query.Get("pool_id"), query.Get("group"))
+		choices, err := a.orders.options(r.Context(), query.Get("kind"), query.Get("zone"), query.Get("pool_id"), query.Get("group"), query.Get("provider"))
 		serverOrderError(err)
 		return row{"choices": choices}
+	})
+	a.route("PUT /api/server-orders/settings/virtua", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		var data struct {
+			Token string `json:"virtua_token"`
+		}
+		bodyObject(w, r, &data, []string{"virtua_token"})
+		token := strings.TrimSpace(data.Token)
+		if !validVirtuaToken(token) {
+			invalid("virtua_token")
+		}
+		c := &virtuaOrder{client: providerClient(a.client), token: token}
+		if err := c.checkAccount(r.Context()); err != nil {
+			fail(502, err.Error())
+		}
+		return a.withStore(func() any { a.s.set("virtua_token", token); return row{"ok": true} })
 	})
 	a.route("PUT /api/server-orders/pools/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		var data struct {
@@ -78,22 +93,25 @@ func (a *App) orderRoutes() {
 	})
 	a.route("POST /api/server-orders", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		var data struct {
-			Request string `json:"request_id"`
-			Zone    string `json:"zone"`
-			Plan    string `json:"plan"`
-			Pool    string `json:"pool_id"`
-			Group   string `json:"group"`
-			Profile string `json:"profile_id"`
+			Request  string `json:"request_id"`
+			Zone     string `json:"zone"`
+			Plan     string `json:"plan"`
+			Pool     string `json:"pool_id"`
+			Group    string `json:"group"`
+			Profile  string `json:"profile_id"`
+			Provider string `json:"provider"`
 		}
 		bodyObject(w, r, &data, []string{"request_id", "zone", "plan", "pool_id", "group", "profile_id"})
-		id, err := a.orders.queue(r.Context(), data.Request, orderSelection{data.Zone, data.Plan, data.Pool, data.Group, data.Profile})
+		id, err := a.orders.queue(r.Context(), data.Request, orderSelection{
+			Zone: data.Zone, Plan: data.Plan, PoolID: data.Pool, Group: data.Group, ProfileID: data.Profile, Provider: data.Provider,
+		})
 		serverOrderError(err)
 		return row{"id": id}
 	})
 	a.route("POST /api/server-orders/{id}/cancel", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
 			id := r.PathValue("id")
-			res := a.s.exec("UPDATE server_orders SET stage='cancelled',updated_at=?,snapshot=NULL,enroll_digest=NULL,error=NULL WHERE id=? AND stage IN ('preflight','provision') AND create_attempted=0", iso(time.Now()), id)
+			res := a.s.exec("UPDATE server_orders SET stage='cancelled',updated_at=?,snapshot=CASE WHEN provider='virtua' THEN snapshot ELSE NULL END,enroll_digest=NULL,error=NULL WHERE id=? AND stage IN ('preflight','provision') AND create_attempted=0", iso(time.Now()), id)
 			n, _ := res.RowsAffected()
 			if n == 0 {
 				fail(409, "Этот заказ уже нельзя отменить")

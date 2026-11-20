@@ -37,7 +37,7 @@ type orderCloudProvider interface {
 	Countries(context.Context) ([]orderCloudCountry, error)
 	Plans(ctx context.Context, zone string) ([]orderCloudPlan, error)
 	PrepareOrder(context.Context, orderCloudRequest) (snapshot json.RawMessage, hostKey, zone string, err error)
-	ProvisionOrder(ctx context.Context, snapshot json.RawMessage, operationID string, claimCreate func() (bool, error)) (serverID, ip string, err error)
+	ProvisionOrder(ctx context.Context, snapshot json.RawMessage, operationID, existingServer string, claimCreate func() (bool, error)) (serverID, ip string, err error)
 }
 
 type upCloudOrder struct {
@@ -116,6 +116,8 @@ type orderCloudPlan struct {
 	StorageTier string  `json:"storage_tier"`
 	Price       float64 `json:"price"`
 	Currency    string  `json:"currency"`
+	Name        string  `json:"name,omitempty"`
+	Country     string  `json:"country,omitempty"`
 }
 
 func (c *upCloudOrder) Plans(ctx context.Context, zone string) ([]orderCloudPlan, error) {
@@ -492,7 +494,7 @@ func (c *upCloudOrder) verifyOrder(ctx context.Context, s upCloudOrderSnapshot, 
 	return ip.Address, nil
 }
 
-func (c *upCloudOrder) ProvisionOrder(ctx context.Context, data json.RawMessage, operationID string, claimCreate func() (bool, error)) (string, string, error) {
+func (c *upCloudOrder) ProvisionOrder(ctx context.Context, data json.RawMessage, operationID, _ string, claimCreate func() (bool, error)) (string, string, error) {
 	var snap upCloudOrderSnapshot
 	if err := json.Unmarshal(data, &snap); err != nil || snap.OperationID != operationID || claimCreate == nil ||
 		!upCloudOrderIDPattern.MatchString(operationID) || !upCloudOrderZonePattern.MatchString(snap.Zone) ||

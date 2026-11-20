@@ -295,7 +295,7 @@ func TestUpCloudOrderRecoversCreateAndVerifiesDiskAndIPv4(t *testing.T) {
 		return true, nil
 	}
 	f.loseCreate = true
-	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, claim); err == nil ||
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); err == nil ||
 		errors.Is(err, errReplacementCreateUnconfirmed) || strings.Contains(err.Error(), "sensitive text") {
 		t.Fatalf("unexpected error after uncertain create: %v", err)
 	}
@@ -303,23 +303,23 @@ func TestUpCloudOrderRecoversCreateAndVerifiesDiskAndIPv4(t *testing.T) {
 	// an outstanding claim must never issue a new POST automatically.
 	upcloud = newUpCloudOrder(&http.Client{Transport: roundTripFunc(f.request)}, "test-token")
 	f.serverExists = false
-	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, claim); !errors.Is(err, errReplacementCreateUnconfirmed) {
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); !errors.Is(err, errReplacementCreateUnconfirmed) {
 		t.Fatalf("expected an explicitly unconfirmed create, got %v", err)
 	}
 	f.serverExists, f.providerStatus = true, "maintenance"
-	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, claim); !errors.Is(err, errReplacementPending) {
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); !errors.Is(err, errReplacementPending) {
 		t.Fatalf("expected maintenance state to retry, got %v", err)
 	}
 	f.providerStatus, f.badDisk = "started", true
-	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, claim); err == nil {
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); err == nil {
 		t.Fatal("adopted a server with a disk from a different order")
 	}
 	f.badDisk, f.wrongIPOwner = false, true
-	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, claim); err == nil {
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); err == nil {
 		t.Fatal("adopted a server with a public IP owned by another VM")
 	}
 	f.wrongIPOwner = false
-	id, ip, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, claim)
+	id, ip, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim)
 	if err != nil || id != testOrderVM || ip != testOrderIP || f.createAttempts != 1 {
 		t.Fatalf("recovered (%s, %s, %v), submitted %d create requests", id, ip, err, f.createAttempts)
 	}
