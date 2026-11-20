@@ -42,6 +42,15 @@ func (a *App) orderRoutes() {
 			return row{"orders": jobs, "pools": pools, "stages": orderStages, "virtua_configured": a.s.get("virtua_token") != ""}
 		})
 	})
+	a.route("GET /api/server-orders/{id}/logs", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		return a.withStore(func() any {
+			id := r.PathValue("id")
+			if a.s.one("SELECT id FROM server_orders WHERE id=?", id) == nil {
+				fail(http.StatusNotFound, "Заказ не найден")
+			}
+			return a.s.all("SELECT id,recorded_at,stage,level,message,occurrences FROM server_order_logs WHERE order_id=? ORDER BY id DESC", id)
+		})
+	})
 	a.route("GET /api/server-orders/options", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		query := r.URL.Query()
 		choices, err := a.orders.options(r.Context(), query.Get("kind"), query.Get("zone"), query.Get("pool_id"), query.Get("group"), query.Get("provider"))

@@ -29,19 +29,41 @@ type virtuaOrder struct {
 }
 
 type virtuaAPIError struct {
-	status int
-	code   string
-	detail string
+	operation string
+	status    int
+	code      string
+	detail    string
 }
 
 func (e *virtuaAPIError) Error() string {
+	prefix := fmt.Sprintf("Virtua.Cloud %s (HTTP %d)", e.operation, e.status)
 	if e.code == "" {
-		return fmt.Sprintf("Virtua.Cloud API: HTTP %d", e.status)
+		return prefix
 	}
 	if e.detail != "" {
-		return fmt.Sprintf("Virtua.Cloud API: %s (%s)", e.code, e.detail)
+		return fmt.Sprintf("%s: %s (%s)", prefix, e.code, e.detail)
 	}
-	return "Virtua.Cloud API: " + e.code
+	return prefix + ": " + e.code
+}
+
+// Only describe the expected schema and JSON kinds. Decoder error strings can
+// include values from an account record or a bootstrap script.
+func virtuaDecodeProblem(err error) string {
+	var field *json.UnmarshalTypeError
+	var syntax *json.SyntaxError
+	switch {
+	case errors.As(err, &field):
+		kind, _, _ := strings.Cut(field.Value, " ")
+		where := "корень ответа"
+		if field.Field != "" {
+			where = "поле " + field.Field
+		}
+		return fmt.Sprintf("%s: тип %s, ожидается %s", where, kind, field.Type.Kind())
+	case errors.As(err, &syntax):
+		return fmt.Sprintf("некорректный JSON, позиция %d", syntax.Offset)
+	default:
+		return "значение не соответствует схеме ответа"
+	}
 }
 
 func validVirtuaOffer(id string) bool {
@@ -53,6 +75,7 @@ func validVirtuaToken(token string) bool {
 }
 
 func (c *virtuaOrder) request(ctx context.Context, method, path string, input url.Values, output any) (http.Header, error) {
+	operation := method + " /v1" + path
 	var body io.Reader
 	if input != nil {
 		body = strings.NewReader(input.Encode())
@@ -73,7 +96,7 @@ func (c *virtuaOrder) request(ctx context.Context, method, path string, input ur
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, integration("нет ответа от API Virtua.Cloud")
+		return nil, integration("нет ответа от Virtua.Cloud " + operation)
 	}
 	defer resp.Body.Close()
 	if method == http.MethodDelete && resp.StatusCode == http.StatusNoContent && output == nil {
@@ -81,8 +104,14 @@ func (c *virtuaOrder) request(ctx context.Context, method, path string, input ur
 	}
 	const maxReply = 8 << 20
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxReply+1))
-	if err != nil || len(data) > maxReply {
-		return nil, integration("не удалось прочитать ответ API Virtua.Cloud")
+	responseError := func(reason string) error {
+		return integration(fmt.Sprintf("Virtua.Cloud %s (HTTP %d): %s", operation, resp.StatusCode, reason))
+	}
+	if err != nil {
+		return nil, responseError("не удалось прочитать тело ответа")
+	}
+	if len(data) > maxReply {
+		return nil, responseError("размер ответа превышает 8 МиБ")
 	}
 	var result struct {
 		Success *bool  `json:"success"`
@@ -91,7 +120,7 @@ func (c *virtuaOrder) request(ctx context.Context, method, path string, input ur
 	}
 	parseErr := json.Unmarshal(data, &result)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || (result.Success != nil && !*result.Success) {
-		apiErr := &virtuaAPIError{status: resp.StatusCode}
+		apiErr := &virtuaAPIError{operation: operation, status: resp.StatusCode}
 		if parseErr == nil && virtuaErrorPattern.MatchString(result.Error) {
 			apiErr.code = result.Error
 			if virtuaErrorPattern.MatchString(result.Code) {
@@ -100,10 +129,17 @@ func (c *virtuaOrder) request(ctx context.Context, method, path string, input ur
 		}
 		return nil, apiErr
 	}
+	if parseErr != nil {
+		return nil, responseError(virtuaDecodeProblem(parseErr))
+	}
 	// /account is documented without a success flag.
-	if parseErr != nil || (result.Success == nil && path != "/account") ||
-		(output != nil && json.Unmarshal(data, output) != nil) {
-		return nil, integration("некорректный ответ API Virtua.Cloud")
+	if result.Success == nil && path != "/account" {
+		return nil, responseError("отсутствует обязательный признак success")
+	}
+	if output != nil {
+		if err := json.Unmarshal(data, output); err != nil {
+			return nil, responseError(virtuaDecodeProblem(err))
+		}
 	}
 	return resp.Header, nil
 }
