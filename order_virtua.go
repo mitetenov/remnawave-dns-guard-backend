@@ -3,11 +3,13 @@ package guard
 import (
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strings"
 	"unicode"
@@ -58,7 +60,11 @@ func virtuaDecodeProblem(err error) string {
 		if field.Field != "" {
 			where = "поле " + field.Field
 		}
-		return fmt.Sprintf("%s: тип %s, ожидается %s", where, kind, field.Type.Kind())
+		expected := field.Type.Kind().String()
+		if field.Type == reflect.TypeFor[virtuaSystemVersion]() {
+			expected = "string или number"
+		}
+		return fmt.Sprintf("%s: тип %s, ожидается %s", where, kind, expected)
 	case errors.As(err, &syntax):
 		return fmt.Sprintf("некорректный JSON, позиция %d", syntax.Offset)
 	default:
@@ -158,22 +164,36 @@ func (c *virtuaOrder) checkAccount(ctx context.Context) error {
 	return nil
 }
 
+type virtuaSystemVersion string
+
+func (v *virtuaSystemVersion) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if dec.PeekKind() != '0' {
+		// Delegate strings and type errors to the decoder so it retains the field path.
+		return errors.ErrUnsupported
+	}
+	token, err := dec.ReadToken()
+	if err == nil {
+		*v = virtuaSystemVersion(token.String())
+	}
+	return err
+}
+
 func (c *virtuaOrder) image(ctx context.Context, diskGB int) (string, error) {
 	var list struct {
 		Systems []struct {
-			ID           string          `json:"uuid"`
-			Distribution string          `json:"distribution"`
-			Version      string          `json:"version"`
-			Category     string          `json:"category"`
-			Windows      json.RawMessage `json:"is_windows"`
-			MinDisk      int             `json:"min_disk_space"`
+			ID           string              `json:"uuid"`
+			Distribution string              `json:"distribution"`
+			Version      virtuaSystemVersion `json:"version"`
+			Category     string              `json:"category"`
+			Windows      json.RawMessage     `json:"is_windows"`
+			MinDisk      int                 `json:"min_disk_space"`
 		} `json:"systems"`
 	}
 	if _, err := c.request(ctx, http.MethodGet, "/cloud/systems", nil, &list); err != nil {
 		return "", err
 	}
 	for _, image := range list.Systems {
-		major, _, _ := strings.Cut(image.Version, ".")
+		major, _, _ := strings.Cut(string(image.Version), ".")
 		if image.Category == "linux" && image.Distribution == "debian" && major == "13" &&
 			oneOf(string(image.Windows), `"0"`, "0", "false") && image.MinDisk > 0 && image.MinDisk <= diskGB &&
 			virtuaIDPattern.MatchString(image.ID) {

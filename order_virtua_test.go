@@ -170,9 +170,28 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 	}
 }
 
+func TestVirtuaOrderImageVersion(t *testing.T) {
+	for _, version := range []string{`13`, `13.1`, `"13"`, `"13.1.2"`} {
+		t.Run(version, func(t *testing.T) {
+			systems := []row{
+				{"uuid": "debian-testing", "category": "linux", "distribution": "debian", "version": "testing", "is_windows": false, "min_disk_space": 10},
+				{"uuid": "debian-12", "category": "linux", "distribution": "debian", "version": 12, "is_windows": false, "min_disk_space": 10},
+				{"uuid": "debian-13", "category": "linux", "distribution": "debian", "version": json.RawMessage(version), "is_windows": false, "min_disk_space": 10},
+			}
+			c := &virtuaOrder{client: &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+				return response(row{"success": true, "systems": systems}, 200), nil
+			})}}
+			id, err := c.image(t.Context(), 40)
+			if err != nil || id != "debian-13" {
+				t.Fatalf("image() = %q, %v", id, err)
+			}
+		})
+	}
+}
+
 func TestVirtuaOrderResponseDiagnostics(t *testing.T) {
 	for _, tc := range []struct{ reply, want string }{
-		{`{"success":true,"systems":[{"version":{"private":"provider-secret"}}]}`, "поле systems.0.version: тип object"},
+		{`{"success":true,"systems":[{"version":{"private":"provider-secret"}}]}`, "поле systems.0.version: тип object, ожидается string или number"},
 		{`{"systems":[],"private":"provider-secret"}`, "отсутствует обязательный признак success"},
 		{`<html>provider-secret`, "некорректный JSON"},
 	} {
