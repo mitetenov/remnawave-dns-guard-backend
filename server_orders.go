@@ -175,10 +175,14 @@ func orderPlanChoice(zone string, p orderCloudPlan) orderChoice {
 	data, _ := json.Marshal(p)
 	id := p.Code + "@" + digest(zone + " " + string(data))[:16]
 	if p.Country != "" {
+		prices := fmt.Sprintf("%.10g %s/ч", p.Price, p.Currency)
+		if p.MonthlyPrice > 0 {
+			prices += fmt.Sprintf(" · ≈ %.2f %s/мес.", p.MonthlyPrice, p.Currency)
+		}
 		return orderChoice{
 			ID: id,
-			Label: fmt.Sprintf("%s · %d vCPU · %d МиБ RAM · %d ГиБ %s · %.10g %s/ч без НДС",
-				p.Name, p.CPU, p.MemoryMB, p.StorageGB, p.StorageTier, p.Price, p.Currency),
+			Label: fmt.Sprintf("%s · %d vCPU · %d МиБ RAM · %d ГиБ %s · %s без НДС",
+				p.Name, p.CPU, p.MemoryMB, p.StorageGB, p.StorageTier, prices),
 		}
 	}
 	family := p.Family
