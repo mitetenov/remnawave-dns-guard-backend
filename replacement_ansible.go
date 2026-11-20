@@ -123,7 +123,7 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Durati
 		info, err := os.Stat(file.path)
 		if !filepath.IsAbs(file.path) || err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 			if order && file.name == "SSH_KEY" {
-				return 0, errors.New("подключите приватный SSH-ключ для заказов через replacement/ssh_key и docker-compose.replacements.yaml или задайте REPLACEMENT_ANSIBLE_SSH_KEY с путём внутри backend")
+				return 0, errors.New("задайте REPLACEMENT_HOST_DIR в .env и положите в этот каталог приватный ключ ssh_key. Если у ключа другое имя, укажите его путь внутри backend в REPLACEMENT_ANSIBLE_SSH_KEY")
 			}
 			return 0, fmt.Errorf("%s%s must point to a nonempty regular file using an absolute path", replacementAnsibleEnv, file.name)
 		}

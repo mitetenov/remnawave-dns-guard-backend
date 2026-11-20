@@ -6,20 +6,20 @@
 
 Образ backend содержит плейбуки для обычных нод (`nodes`) и нод за CDN (`nodes_wl`), их роли, файлы развёртывания и коллекции. При сборке они загружаются из зафиксированной ревизии основной ветки `mitetenov/ansible`. Для заказов DNS Guard формирует inventory с одной нодой, подставляет её домен и ключ Remnawave. Приватный SSH-ключ и настройки групп подключаются с машины развёртывания. Встроенный комплект пропускает установку Alloy, поскольку исходный шаблон настроен для конкретной установки Grafana. [Ревизия Ansible в образе](https://github.com/mitetenov/ansible/tree/d08132cf664ed60174292e09565342dda0e267fb)
 
-1. Рядом с `docker-compose.yaml` положите приватный SSH-ключ входа в `replacement/ssh_key`. Backend работает под UID 10001, которому нужны проход по каталогам и доступ на чтение файлов. Для SSH-ключа нужны права `0600` или `0400` и вход без запроса пароля. По умолчанию используется `root`. Для другого пользователя задайте `REPLACEMENT_ANSIBLE_SSH_USER` в `.env` и настройте повышение привилегий на нодах.
+1. Укажите в `.env` `REPLACEMENT_HOST_DIR=./replacement` и положите приватный SSH-ключ входа в `replacement/ssh_key` рядом с `docker-compose.yaml`. Можно указать абсолютный путь к каталогу на хосте. Внутри backend каталог доступен только для чтения по пути `/run/dns-guard/replacement`. Backend работает под UID 10001, которому нужны проход по каталогам и доступ на чтение файлов. Для SSH-ключа нужны права `0600` или `0400` и вход без запроса пароля. По умолчанию используется `root`. Для другого пользователя задайте `REPLACEMENT_ANSIBLE_SSH_USER` в `.env` и настройте повышение привилегий на нодах.
 
 2. Укажите свой email для Certbot в `REPLACEMENT_ANSIBLE_CERTBOT_EMAIL` в `.env`. Для типа `nodes_wl` добавьте `REPLACEMENT_ANSIBLE_XHTTP_PATH` из профиля Remnawave. Путь начинается и заканчивается косой чертой. Если профиль использует порт, отличный от 8443, задайте `REPLACEMENT_ANSIBLE_XHTTP_UPSTREAM=127.0.0.1:<порт>`. У обычной ноды стандартный TLS-вход nginx слушает `127.0.0.1:4321` с PROXY protocol.
 
    Каталог `replacement/group_vars` можно использовать для переопределений в `all.yml`, `nodes.yml` и `nodes_wl.yml`. Значения из этих файлов имеют приоритет над стандартными параметрами и настройками Certbot и XHTTP из `.env`. Произвольный путь внутри контейнера задаётся через `REPLACEMENT_ANSIBLE_GROUP_VARS_DIR`.
 
-3. Положите `docker-compose.replacements.yaml` из той же версии проекта рядом с `docker-compose.yaml`. Он монтирует `./replacement` только для чтения. Добавьте в `.env` строку `COMPOSE_FILE=docker-compose.yaml:docker-compose.replacements.yaml`, чтобы обычный `docker compose up -d` и обновления загружали оба файла. [Дополнительный файл Compose](../docker-compose.replacements.yaml)
+3. Запустите Compose из каталога установки. Для перехода с двух Compose-файлов сначала обновите основной `docker-compose.yaml` и удалите `COMPOSE_FILE` из `.env`. [Основной файл Compose](../docker-compose.yaml)
 
    ```sh
    docker compose config --quiet
    docker compose up -d
    ```
 
-При обновлении со стандартной установки с внешним репозиторием backend также подхватывает `replacement/ansible/inventory/group_vars`, если `replacement/group_vars` отсутствует. Чтобы использовать плейбуки из образа, удалите `REPLACEMENT_ANSIBLE_REPO_DIR` из `.env` и обновите дополнительный файл Compose. Если внешний репозиторий нужен для ручных привязок, задайте `REPLACEMENT_ANSIBLE_MANUAL_REPO_DIR=/run/dns-guard/replacement/ansible`. Чтобы использовать внешние плейбуки для обоих режимов, оставьте `REPLACEMENT_ANSIBLE_REPO_DIR` с путём к смонтированному репозиторию.
+При обновлении со стандартной установки с внешним репозиторием backend также подхватывает `replacement/ansible/inventory/group_vars`, если `replacement/group_vars` отсутствует. Чтобы использовать плейбуки из образа, удалите `REPLACEMENT_ANSIBLE_REPO_DIR` из `.env`. Если внешний репозиторий нужен для ручных привязок, задайте `REPLACEMENT_ANSIBLE_MANUAL_REPO_DIR=/run/dns-guard/replacement/ansible`. Чтобы использовать внешние плейбуки для обоих режимов, оставьте `REPLACEMENT_ANSIBLE_REPO_DIR` с путём к смонтированному репозиторию.
 
 ## Автозамена нод с ручной привязкой
 
@@ -53,7 +53,16 @@
    <uuid-ноды-remnawave> ssh-ed25519 <публичный-ключ-хоста-в-base64>
    ```
 
-4. Подключите `./replacement` через дополнительный файл Compose и примените настройки, как описано в предыдущем разделе. В **Настройках** подключите Cloudflare и Remnawave. Для Cloudflare нужны чтение зоны и изменение DNS. Для Remnawave нужны чтение нод и хостов, изменение адреса ноды и хостов с явным IP. В **Автозамене** сохраните API-токен UpCloud с доступом к VM, дискам, планам, интерфейсам, правилам firewall и управлению публичными IP. Для целевого узла укажите UUID VM и ноды, разрешите замену и включите автоматизацию пула.
+4. Задайте пути в `.env` и запустите `docker compose up -d`.
+
+   ```dotenv
+   REPLACEMENT_HOST_DIR=./replacement
+   REPLACEMENT_ANSIBLE_SSH_KEY=/run/dns-guard/replacement/ssh_key
+   REPLACEMENT_ANSIBLE_NODE_VARS_DIR=/run/dns-guard/replacement/node_vars
+   REPLACEMENT_ANSIBLE_KNOWN_HOSTS=/run/dns-guard/replacement/known_hosts
+   ```
+
+   В **Настройках** подключите Cloudflare и Remnawave. Для Cloudflare нужны чтение зоны и изменение DNS. Для Remnawave нужны чтение нод и хостов, изменение адреса ноды и хостов с явным IP. В **Автозамене** сохраните API-токен UpCloud с доступом к VM, дискам, планам, интерфейсам, правилам firewall и управлению публичными IP. Для целевого узла укажите UUID VM и ноды, разрешите замену и включите автоматизацию пула.
 
 Если на узле включён Certbot, плейбук использует сертификаты с перенесённого диска. Для выдачи или продления через HTTP-01 домен `nginx_node_domain` должен вести к доступному ACME webroot в момент запуска роли `ssl`. Это важно для индивидуального домена ноды или отдельного CDN origin. Смена A-записи пула происходит после Ansible и успешных проверок.
 
@@ -75,7 +84,7 @@
 
 ### Два отдельных плейбука
 
-Для ручных привязок также доступны `REPLACEMENT_ANSIBLE_INSTALL_PLAYBOOK` и `REPLACEMENT_ANSIBLE_TUNING_PLAYBOOK`. Подключите свои плейбуки через собственный файл Compose и оставьте `REPLACEMENT_ANSIBLE_MANUAL_REPO_DIR` и `REPLACEMENT_ANSIBLE_REPO_DIR` пустыми. Оба плейбука должны обрабатывать группу `all` или хост `replacement` и поддерживать повторный запуск через SSH на порту 22. Доступны переменные `dns_guard_node_uuid`, `dns_guard_replacement_ip` и `dns_guard_node_vars`. Для этого режима формат файлов `<uuid>.json` остаётся произвольным объектом переменных. [Переменные окружения](../.env.example)
+Для ручных привязок также доступны `REPLACEMENT_ANSIBLE_INSTALL_PLAYBOOK` и `REPLACEMENT_ANSIBLE_TUNING_PLAYBOOK`. Положите плейбуки в `REPLACEMENT_HOST_DIR`, укажите их пути внутри контейнера в `.env` и оставьте `REPLACEMENT_ANSIBLE_MANUAL_REPO_DIR` и `REPLACEMENT_ANSIBLE_REPO_DIR` пустыми. Оба плейбука должны обрабатывать группу `all` или хост `replacement` и поддерживать повторный запуск через SSH на порту 22. Доступны переменные `dns_guard_node_uuid`, `dns_guard_replacement_ip` и `dns_guard_node_vars`. Для этого режима формат файлов `<uuid>.json` остаётся произвольным объектом переменных. [Переменные окружения](../.env.example)
 
 ## Какие серверы подходят
 
