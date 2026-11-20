@@ -4,12 +4,62 @@ package guard
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestAnsibleLoginKeyFromEnvironment(t *testing.T) {
+	sshKeygen, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		t.Skip("requires ssh-keygen")
+	}
+	keyPath := filepath.Join(t.TempDir(), "fixture_key")
+	if err := exec.Command(sshKeygen, "-q", "-t", "ed25519", "-N", "", "-f", keyPath).Run(); err != nil {
+		t.Fatalf("generate fixture key: %v", err)
+	}
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicData, err := os.ReadFile(keyPath + ".pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedPublic, ok := replacementPublicKeyFields(string(publicData))
+	if !ok {
+		t.Fatal("invalid fixture public key")
+	}
+	t.Setenv("REPLACEMENT_ANSIBLE_SSH_KEY", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv(replacementLoginKeyEnv, base64.StdEncoding.EncodeToString(data))
+	runner := newOrderAnsible()
+	if key, err := runner.loginPublicKey(t.Context()); err != nil || key != expectedPublic {
+		t.Fatalf("could not derive expected public key: %v", err)
+	}
+	work, err := runner.createAnsibleWorkspace("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(work) })
+	stagedPath := filepath.Join(work, "login_key")
+	staged, err := os.ReadFile(stagedPath)
+	if err != nil || string(staged) != string(data) {
+		t.Fatal("workspace does not contain the expected private key")
+	}
+	info, err := os.Lstat(stagedPath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatal("workspace key must be a regular file readable only by its owner")
+	}
+	t.Setenv(replacementLoginKeyEnv, "invalid-private-key-value!")
+	if _, err := newOrderAnsible().loginPublicKey(t.Context()); err == nil ||
+		!strings.Contains(err.Error(), replacementLoginKeyEnv) || strings.Contains(err.Error(), "invalid-private-key-value") {
+		t.Fatalf("expected an error identifying the setting without its value, got %v", err)
+	}
+}
 
 func TestOrderAnsibleDefaultsToBundledFiles(t *testing.T) {
 	t.Setenv("REPLACEMENT_ANSIBLE_REPO_DIR", "")

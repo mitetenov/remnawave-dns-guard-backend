@@ -33,6 +33,7 @@ type replacementAnsible struct {
 	orderCertbotEmail, orderXHTTPPath string
 	orderXHTTPUpstream                string
 	sshUser, sshKey, knownHosts       string
+	sshKeyBase64                      string
 	nodeVarsDir, timeout              string
 }
 
@@ -53,6 +54,7 @@ func newReplacementAnsible() *replacementAnsible {
 		orderGroupVarsDir: os.Getenv(replacementAnsibleEnv + "GROUP_VARS_DIR"),
 		sshUser:           sshUser,
 		sshKey:            os.Getenv(replacementAnsibleEnv + "SSH_KEY"),
+		sshKeyBase64:      strings.TrimSpace(os.Getenv(replacementLoginKeyEnv)),
 		knownHosts:        os.Getenv(replacementAnsibleEnv + "KNOWN_HOSTS"),
 		nodeVarsDir:       os.Getenv(replacementAnsibleEnv + "NODE_VARS_DIR"),
 		timeout:           env(replacementAnsibleEnv+"TIMEOUT", "20m"),
@@ -118,12 +120,14 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Durati
 	if !order {
 		files = append(files, requiredFile{"KNOWN_HOSTS", a.knownHosts})
 	}
-	files = append(files, requiredFile{"SSH_KEY", a.sshKey})
+	if a.sshKeyBase64 == "" {
+		files = append(files, requiredFile{"SSH_KEY", a.sshKey})
+	}
 	for _, file := range files {
 		info, err := os.Stat(file.path)
 		if !filepath.IsAbs(file.path) || err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 			if order && file.name == "SSH_KEY" {
-				return 0, errors.New("задайте REPLACEMENT_HOST_DIR в .env и положите в этот каталог приватный ключ ssh_key. Если у ключа другое имя, укажите его путь внутри backend в REPLACEMENT_ANSIBLE_SSH_KEY")
+				return 0, errors.New("добавьте приватный SSH-ключ в .env через REPLACEMENT_ANSIBLE_SSH_KEY_BASE64 или подключите файл через REPLACEMENT_ANSIBLE_SSH_KEY")
 			}
 			return 0, fmt.Errorf("%s%s must point to a nonempty regular file using an absolute path", replacementAnsibleEnv, file.name)
 		}
@@ -308,9 +312,9 @@ func (a *replacementAnsible) createAnsibleWorkspace(knownHosts string) (string, 
 	if err != nil {
 		return "", errors.New("cannot create replacement Ansible workspace")
 	}
-	if err := os.Symlink(a.sshKey, filepath.Join(work, "login_key")); err != nil {
+	if err := a.stageLoginKey(filepath.Join(work, "login_key")); err != nil {
 		_ = os.RemoveAll(work)
-		return "", errors.New("cannot prepare replacement Ansible SSH identity")
+		return "", err
 	}
 	mode := os.FileMode(0o600)
 	if a.repoDir != "" {
