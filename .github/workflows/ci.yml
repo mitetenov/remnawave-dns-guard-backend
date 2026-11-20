@@ -60,7 +60,20 @@ jobs:
           COOKIE_SECURE=true
           DATABASE_PATH=/data/guard.db
           EOF
-          docker compose config --quiet
+          docker compose config --format json | jq -e '
+            .services.backend.volumes | any(.[];
+              .target == "/run/dns-guard/replacement" and .type == "volume"
+              and .source == "guard-replacement" and .read_only)'
+          cat >> .env <<'EOF'
+          REPLACEMENT_HOST_DIR=./replacement-ci
+          REPLACEMENT_ANSIBLE_CERTBOT_EMAIL=admin@example.test
+          EOF
+          docker compose config --format json | jq -e '
+            .services.backend as $backend |
+            ($backend.environment.REPLACEMENT_ANSIBLE_CERTBOT_EMAIL == "admin@example.test")
+            and ($backend.volumes | any(.[];
+              .target == "/run/dns-guard/replacement" and .type == "bind"
+              and (.source | endswith("/replacement-ci")) and .read_only))'
           docker compose -f docker-compose.yaml -f docker-compose.replacements.yaml config --quiet
 
   image-check:

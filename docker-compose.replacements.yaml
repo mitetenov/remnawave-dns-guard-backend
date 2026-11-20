@@ -1,3 +1,4 @@
+# Compatibility for installations that still use the older two-file setup.
 services:
   backend:
     volumes:

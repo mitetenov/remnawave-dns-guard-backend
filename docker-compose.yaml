@@ -14,6 +14,7 @@ services:
       - .env
     volumes:
       - guard-data:/data
+      - "${REPLACEMENT_HOST_DIR:-guard-replacement}:/run/dns-guard/replacement:ro"
     expose:
       - "8000"
     healthcheck:
@@ -54,3 +55,4 @@ services:
 
 volumes:
   guard-data:
+  guard-replacement:
