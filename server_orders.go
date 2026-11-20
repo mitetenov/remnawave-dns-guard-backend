@@ -400,7 +400,7 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 		if err != nil {
 			return "", err
 		}
-		if names[alias] || s.one("SELECT id FROM server_orders WHERE domain=? UNION ALL SELECT id FROM pools WHERE hostname=?", domain, domain) != nil {
+		if names[alias] || s.replacementDomainUsed("", domain) {
 			serial++
 			continue
 		}

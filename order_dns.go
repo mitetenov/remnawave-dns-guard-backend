@@ -45,15 +45,21 @@ func (c *Cloudflare) checkOrderOriginZone(domain, zoneID string) error {
 // the pool hostname. The order marker controls adoption and future changes.
 func (c *Cloudflare) checkOrderOrigin(j row, oldIP, newIP string, mutate bool) (float64, error) {
 	orderID, valid := canonicalUUID(str(j["id"]))
+	if !valid {
+		return 0, integration("The ordered node origin record configuration is invalid")
+	}
+	return c.checkNodeOrigin(j, "dns-guard-order:"+orderID, oldIP, newIP, mutate, false)
+}
+
+func (c *Cloudflare) checkNodeOrigin(j row, marker, oldIP, newIP string, mutate, manual bool) (float64, error) {
 	domain := strings.ToLower(strings.TrimSuffix(str(j["domain"]), "."))
 	zoneID := str(j["zone_id"])
-	if !valid || oldIP != "" && !publicIPv4(oldIP) || newIP != "" && !publicIPv4(newIP) || mutate && newIP == "" {
+	if oldIP != "" && !publicIPv4(oldIP) || newIP != "" && !publicIPv4(newIP) || mutate && newIP == "" {
 		return 0, integration("The ordered node origin record configuration is invalid")
 	}
 	if err := c.checkOrderOriginZone(domain, zoneID); err != nil {
 		return 0, err
 	}
-	marker := "dns-guard-order:" + orderID
 	path := "/zones/" + url.PathEscape(zoneID) + "/dns_records"
 	read := func() (row, error) {
 		records, err := c.pages(path, url.Values{"name": {domain}})
@@ -70,7 +76,9 @@ func (c *Cloudflare) checkOrderOrigin(j row, oldIP, newIP string, mutate bool) (
 			}
 			switch record["type"] {
 			case "A":
-				if owned != nil || record["comment"] != marker || record["proxied"] != false ||
+				comment := str(record["comment"])
+				ownedByOther := strings.HasPrefix(comment, "dns-guard-order:") || strings.HasPrefix(comment, "dns-guard-replacement:")
+				if owned != nil || (comment != marker && (!manual || ownedByOther)) || record["proxied"] != false ||
 					!stringFields(record, "id", "content") || str(record["id"]) == "" {
 					return nil, integration("The ordered node domain has a conflicting Cloudflare A record")
 				}
@@ -102,7 +110,7 @@ func (c *Cloudflare) checkOrderOrigin(j row, oldIP, newIP string, mutate bool) (
 	if record != nil && (oldIP == "" || currentIP != oldIP) {
 		return 0, integration("The ordered node origin points to an unexpected IPv4 address")
 	}
-	if record == nil && (oldIP != "" || !mutate) {
+	if record == nil && ((!manual && (oldIP != "" || !mutate)) || (manual && oldIP == "" && !mutate)) {
 		return 0, integration("The ordered node's owned Cloudflare A record could not be found")
 	}
 	if !mutate {
@@ -118,8 +126,7 @@ func (c *Cloudflare) checkOrderOrigin(j row, oldIP, newIP string, mutate bool) (
 			"type": "A", "name": domain, "content": newIP, "ttl": configuredTTL, "proxied": false, "comment": marker,
 		})
 	} else {
-		// An atomic record change keeps the record's marker, TTL and DNS-only
-		// status. Only the selected record's address changes.
+		// Keep the record's comment, TTL and DNS-only status.
 		_, mutationErr = c.request(http.MethodPatch, path+"/"+url.PathEscape(str(record["id"])), nil, row{"content": newIP})
 	}
 	confirmed, err := read()

@@ -218,7 +218,7 @@ func (a *App) pollChecker(data Poll) []row {
 	// Newly registered checkers and newly enrolled targets need no setup in Guard.
 	s.exec("INSERT OR IGNORE INTO target_checks (target_id,agent_id) SELECT targets.id,? FROM targets JOIN pools ON pools.id=targets.pool_id WHERE manual_enabled=1 AND profile IS NOT NULL", data.AgentID)
 	capacity := 4 - int(num(s.one("SELECT COUNT(*) n FROM jobs WHERE agent_id=? AND consumed=0", data.AgentID)["n"]))
-	for _, target := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id JOIN target_checks c ON c.target_id=targets.id AND c.agent_id=? WHERE manual_enabled=1 AND profile IS NOT NULL AND c.next_due<=? AND (dns_action IS NULL OR dns_action!='replace_ip') AND NOT EXISTS (SELECT 1 FROM replacement_jobs r WHERE r.target_id=targets.id AND r.stage IN ('retire','provision','ansible','remnawave')) AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND agent_id=? AND consumed=0) ORDER BY c.next_due,targets.id", data.AgentID, now, data.AgentID) {
+	for _, target := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id JOIN target_checks c ON c.target_id=targets.id AND c.agent_id=? WHERE manual_enabled=1 AND profile IS NOT NULL AND c.next_due<=? AND (dns_action IS NULL OR dns_action!='replace_ip') AND NOT EXISTS (SELECT 1 FROM replacement_jobs r WHERE r.target_id=targets.id AND r.stage IN ('retire','provision','enrollment','ansible','remnawave')) AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND agent_id=? AND consumed=0) ORDER BY c.next_due,targets.id", data.AgentID, now, data.AgentID) {
 		if len(jobs) >= capacity {
 			break
 		}

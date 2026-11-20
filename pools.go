@@ -20,7 +20,7 @@ func (a *App) poolRoutes() {
 		bodyObject(w, r, &data, []string{"name", "hostname", "zone_id"})
 		validatePool(&data)
 		return a.withStore(func() any {
-			if a.s.one("SELECT id FROM server_orders WHERE domain=?", data.Hostname) != nil {
+			if a.s.nodeDomainReserved(data.Hostname) {
 				fail(409, "Домен зарезервирован для ноды")
 			}
 			if data.AutomationEnabled {
@@ -74,7 +74,7 @@ func (a *App) poolRoutes() {
 				}()
 				validatePool(&data)
 			}()
-			if data.Hostname != old["hostname"] && a.s.one("SELECT id FROM server_orders WHERE domain=?", data.Hostname) != nil {
+			if data.Hostname != old["hostname"] && a.s.nodeDomainReserved(data.Hostname) {
 				fail(409, "Домен зарезервирован для ноды")
 			}
 			if (data.Hostname != old["hostname"] || data.ZoneID != old["zone_id"]) && a.s.orderForPool(id) {

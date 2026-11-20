@@ -5,6 +5,42 @@ import (
 	"strings"
 )
 
+func (r *Remnawave) checkVirtuaCutover(job row) error {
+	nodes, err := r.nodes()
+	if err != nil {
+		return err
+	}
+	boundAddress := ""
+	for _, node := range nodes {
+		if node["address"] == job["old_ip"] {
+			return errors.New("прежний IP всё ещё используется нодой Remnawave")
+		}
+		if strings.EqualFold(str(node["uuid"]), str(job["node_uuid"])) {
+			boundAddress = str(node["address"])
+		} else if replacementUsesOrigin(job, node["address"]) {
+			return errors.New("домен используется другой нодой Remnawave")
+		}
+	}
+	if boundAddress != job["new_ip"] && !replacementUsesOrigin(job, boundAddress) {
+		return errors.New("не подтверждён новый адрес привязанной ноды Remnawave")
+	}
+	hosts, err := r.hosts()
+	if err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		if host["address"] == job["old_ip"] {
+			return errors.New("прежний IP всё ещё используется хостом Remnawave")
+		}
+	}
+	return nil
+}
+
+func replacementUsesOrigin(job row, address any) bool {
+	origin := str(job["node_domain"])
+	return origin != "" && strings.EqualFold(strings.TrimSuffix(str(address), "."), origin)
+}
+
 func (r *Remnawave) checkReplacementNode(job row, update bool) error {
 	nodes, err := r.nodes()
 	if err != nil {
@@ -13,12 +49,15 @@ func (r *Remnawave) checkReplacementNode(job row, update bool) error {
 	found := false
 	for _, node := range nodes {
 		if !strings.EqualFold(str(node["uuid"]), str(job["node_uuid"])) {
-			if node["address"] == job["old_ip"] || node["address"] == job["new_ip"] {
+			if node["address"] == job["old_ip"] || node["address"] == job["new_ip"] || replacementUsesOrigin(job, node["address"]) {
 				return errors.New("этот адрес используется другой нодой Remnawave")
 			}
 			continue
 		}
 		found = true
+		if replacementUsesOrigin(job, node["address"]) {
+			continue
+		}
 		if update && node["address"] == job["new_ip"] {
 			continue
 		}
@@ -33,7 +72,7 @@ func (r *Remnawave) checkReplacementNode(job row, update bool) error {
 		return nil
 	}
 	for _, node := range nodes {
-		if strings.EqualFold(str(node["uuid"]), str(job["node_uuid"])) && node["address"] != job["new_ip"] {
+		if strings.EqualFold(str(node["uuid"]), str(job["node_uuid"])) && node["address"] != job["new_ip"] && !replacementUsesOrigin(job, node["address"]) {
 			if err = r.patch("nodes", row{"uuid": job["node_uuid"], "address": job["new_ip"]}); err != nil {
 				return err
 			}
