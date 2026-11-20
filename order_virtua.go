@@ -6,14 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 	"unicode"
 )
 
@@ -124,123 +120,6 @@ func (c *virtuaOrder) checkAccount(ctx context.Context) error {
 		return integration("Virtua.Cloud не вернул данные аккаунта")
 	}
 	return nil
-}
-
-type virtuaCatalogZone struct {
-	Code    string `json:"code"`
-	Country string `json:"country"`
-	City    string `json:"city"`
-	State   string `json:"state"`
-}
-
-type virtuaCatalogPlan struct {
-	Name     string `json:"name"`
-	OS       string `json:"os_family"`
-	CPUModel string `json:"cpu_family"`
-	CPU      int    `json:"vcpus"`
-	RAM      int    `json:"memory_mb"`
-	Disk     int    `json:"disk_gb"`
-	DiskType string `json:"disk_type"`
-	Hourly   string `json:"price_hour"`
-	Zones    []struct {
-		Code  string `json:"code"`
-		Offer string `json:"offer_id"`
-	} `json:"zones"`
-}
-
-type virtuaCatalog struct {
-	Currency string              `json:"currency"`
-	Zones    []virtuaCatalogZone `json:"zones"`
-	Plans    []virtuaCatalogPlan `json:"plans"`
-}
-
-type virtuaCatalogCache struct {
-	mu      sync.Mutex
-	expires time.Time
-	data    virtuaCatalog
-}
-
-func (c *virtuaOrder) catalog(ctx context.Context, refresh bool) (virtuaCatalog, error) {
-	cache := c.cache
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	if !refresh && time.Now().Before(cache.expires) {
-		return cache.data, nil
-	}
-	var catalog virtuaCatalog
-	headers, err := c.request(ctx, http.MethodGet, "/offers", nil, &catalog)
-	if err != nil {
-		return catalog, err
-	}
-	if catalog.Currency != "EUR" || catalog.Zones == nil || catalog.Plans == nil {
-		return catalog, integration("Virtua.Cloud вернул неполный каталог тарифов")
-	}
-	cache.data = catalog
-	cache.expires = time.Time{}
-	for entry := range strings.SplitSeq(headers.Get("Cache-Control"), ",") {
-		value, ok := strings.CutPrefix(strings.TrimSpace(entry), "max-age=")
-		if seconds, err := strconv.Atoi(value); ok && err == nil && seconds > 0 && seconds <= 300 {
-			cache.expires = time.Now().Add(time.Duration(seconds) * time.Second)
-		}
-	}
-	return catalog, nil
-}
-
-func (cat virtuaCatalog) plansIn(zone virtuaCatalogZone) []orderCloudPlan {
-	var out []orderCloudPlan
-	if zone.State != "available" || !virtuaZonePattern.MatchString(zone.Code) || !virtuaCountryPattern.MatchString(zone.Country) {
-		return out
-	}
-	seen := map[string]bool{}
-	for _, p := range cat.Plans {
-		hour, err := strconv.ParseFloat(p.Hourly, 64)
-		if p.OS != "linux" || p.Name == "" || p.CPU <= 0 || p.RAM <= 0 || p.Disk <= 0 ||
-			err != nil || hour <= 0 || math.IsNaN(hour) || math.IsInf(hour, 0) {
-			continue
-		}
-		for _, entry := range p.Zones {
-			if entry.Code != zone.Code || !validVirtuaOffer(entry.Offer) || seen[entry.Offer] {
-				continue
-			}
-			seen[entry.Offer] = true
-			out = append(out, orderCloudPlan{
-				Code: entry.Offer, Name: strings.TrimSpace(p.Name + " " + p.CPUModel), Country: zone.Country,
-				CPU: p.CPU, MemoryMB: p.RAM, StorageGB: p.Disk, StorageTier: p.DiskType, Price: hour, Currency: cat.Currency,
-			})
-		}
-	}
-	return out
-}
-
-func (c *virtuaOrder) Countries(ctx context.Context) ([]orderCloudCountry, error) {
-	cat, err := c.catalog(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	var countries []orderCloudCountry
-	for _, z := range cat.Zones {
-		if len(cat.plansIn(z)) > 0 {
-			countries = append(countries, orderCloudCountry{Code: z.Country, Name: z.City + " · " + z.Country, Zones: []string{z.Code}})
-		}
-	}
-	return countries, nil
-}
-
-func (c *virtuaOrder) Plans(ctx context.Context, zone string) ([]orderCloudPlan, error) {
-	return c.zonePlans(ctx, zone, false)
-}
-
-func (c *virtuaOrder) zonePlans(ctx context.Context, zone string, refresh bool) ([]orderCloudPlan, error) {
-	cat, err := c.catalog(ctx, refresh)
-	if err != nil {
-		return nil, err
-	}
-	for _, z := range cat.Zones {
-		if z.Code == zone {
-			return cat.plansIn(z), nil
-		}
-	}
-	return nil, nil
 }
 
 func (c *virtuaOrder) image(ctx context.Context, diskGB int) (string, error) {

@@ -108,16 +108,17 @@ func (c *upCloudOrder) Countries(ctx context.Context) ([]orderCloudCountry, erro
 }
 
 type orderCloudPlan struct {
-	Code        string  `json:"code"`
-	Family      string  `json:"-"` // Catalog metadata, excluded from order snapshots and quotes.
-	CPU         int     `json:"cpu"`
-	MemoryMB    int     `json:"memory_mb"`
-	StorageGB   int     `json:"storage_gb"`
-	StorageTier string  `json:"storage_tier"`
-	Price       float64 `json:"price"`
-	Currency    string  `json:"currency"`
-	Name        string  `json:"name,omitempty"`
-	Country     string  `json:"country,omitempty"`
+	Code         string  `json:"code"`
+	Family       string  `json:"-"` // Catalog metadata, excluded from order snapshots and quotes.
+	CPU          int     `json:"cpu"`
+	MemoryMB     int     `json:"memory_mb"`
+	StorageGB    int     `json:"storage_gb"`
+	StorageTier  string  `json:"storage_tier"`
+	Price        float64 `json:"price"`
+	MonthlyPrice float64 `json:"-"` // Display estimate. Orders charge the hourly rate.
+	Currency     string  `json:"currency"`
+	Name         string  `json:"name,omitempty"`
+	Country      string  `json:"country,omitempty"`
 }
 
 func (c *upCloudOrder) Plans(ctx context.Context, zone string) ([]orderCloudPlan, error) {

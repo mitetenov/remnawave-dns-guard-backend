@@ -32,6 +32,8 @@ func TestVirtuaReplacementRecoversPaidOrderAndPinsNewHostKey(t *testing.T) {
 			return ok(row{"currency": "EUR", "zones": []row{{"code": zone, "country": "FR", "state": "available"}},
 				"plans": []row{{"name": "Plan A", "os_family": "linux", "vcpus": 1, "memory_mb": 1024, "disk_gb": 20, "price_hour": "0.02",
 					"zones": []row{{"code": zone, "offer_id": "plan-a"}}}}})
+		case "GET /v1/cloud/offers":
+			return ok(row{"offers": []row{{"uuid": "plan-a", "name": "Plan A", "category": "vcs", "vcpus": 1, "memory": 1024, "disk": 20, "price_hour": "0.02", "price_month": "14.40", "currency": "EUR"}}})
 		case "GET /v1/script":
 			scripts := []row{}
 			if scriptPresent {

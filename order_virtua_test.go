@@ -19,7 +19,8 @@ const (
 func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 	ctx := t.Context()
 	hostname := "dns-guard-" + testVirtuaOrderID
-	catalogRequests, scriptPosts, serverPosts := 0, 0, 0
+	const plusOffer = "vcs-2+-ryzen.par01fr"
+	catalogRequests, accountRequests, scriptPosts, serverPosts := 0, 0, 0, 0
 	claimed, exists, ready := false, false, false
 	var script string
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -46,9 +47,17 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 			res, _ := ok(row{"currency": "EUR", "zones": []row{{"code": "par01fr", "country": "FR", "city": "Paris", "state": "available"}, {"code": "fmt02us", "country": "US", "city": "Fremont", "state": "sold_out"}}, "plans": []row{offer}})
 			res.Header.Set("Cache-Control", "public, max-age=300")
 			return res, nil
+		case "GET /v1/cloud/offers":
+			accountRequests++
+			return ok(row{"offers": []row{
+				{"uuid": "vcs-2.par01fr", "name": "vCS-2", "category": "vcs", "vcpus": 1, "memory": 2048, "disk": 40, "price_hour": "0.0167", "price_month": "12.00", "currency": "EUR"},
+				{"uuid": plusOffer, "name": "vCS-2+", "is_windows_included": "0", "cpu_family": "amd-ryzen", "vcpus": "2", "memory_size": "2048", "root_space": "60", "root_disk_type": "nvme", "price_hour": "0.0292", "price_month": "21.00"},
+				{"uuid": "vcs-2+-ryzen.fmt02us", "name": "vCS-2+", "category": "vcs", "vcpus": 2, "memory": 2048, "disk": 60, "price_hour": "0.0292"},
+				{"uuid": "windows.par01fr", "name": "Windows", "is_windows_included": true, "vcpus": 2, "memory": 2048, "disk": 60, "price_hour": "0.04"},
+			}})
 		case "GET /v1/cloud/systems":
 			return ok(row{"systems": []row{
-				{"uuid": "debian-13-too-large", "category": "linux", "distribution": "debian", "version": "13", "is_windows": "0", "min_disk_space": 50},
+				{"uuid": "debian-13-too-large", "category": "linux", "distribution": "debian", "version": "13", "is_windows": "0", "min_disk_space": 80},
 				{"uuid": "debian-13", "category": "linux", "distribution": "debian", "version": "13.1", "is_windows": "0", "min_disk_space": 10},
 			}})
 		case "GET /v1/script":
@@ -78,7 +87,7 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 			return ok(row{"cloud_servers": servers})
 		case "POST /v1/cloud/order":
 			serverPosts++
-			if !claimed || fields.Get("offer") != "vcs-2.par01fr" || fields.Get("hostname") != hostname ||
+			if !claimed || fields.Get("offer") != plusOffer || fields.Get("hostname") != hostname ||
 				fields.Get("system") != "debian-13" || fields.Get("script") != testVirtuaScript || fields.Get("billing_period") != "0" {
 				t.Fatalf("incorrect order form: %v", fields)
 			}
@@ -99,15 +108,23 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 		t.Fatalf("incorrect countries %+v: %v", countries, err)
 	}
 	plans, err := c.Plans(ctx, "par01fr")
-	if err != nil || len(plans) != 1 || plans[0].Country != "FR" || catalogRequests != 1 {
-		t.Fatalf("incorrect plans %+v after %d catalog requests: %v", plans, catalogRequests, err)
+	if err != nil || len(plans) != 2 || catalogRequests != 1 || accountRequests != 1 {
+		t.Fatalf("incorrect plans %+v after %d public and %d account catalog requests: %v", plans, catalogRequests, accountRequests, err)
 	}
-	quote := orderPlanChoice("par01fr", plans[0])
-	if !strings.Contains(quote.Label, "0.0167 EUR/ч без НДС") {
+	plan := plans[1]
+	if plan.Code != plusOffer || plan.Country != "FR" || plan.CPU != 2 || plan.MemoryMB != 2048 || plan.StorageGB != 60 {
+		t.Fatalf("missing account-only vCS-2+ plan: %+v", plan)
+	}
+	quote := orderPlanChoice("par01fr", plan)
+	if !strings.Contains(quote.Label, "0.0292 EUR/ч · ≈ 21.00 EUR/мес. без НДС") {
 		t.Fatalf("incorrect customer quote: %s", quote.Label)
 	}
+	plan.MonthlyPrice = 0
+	if orderPlanChoice("par01fr", plan).ID != quote.ID {
+		t.Fatal("changing the monthly estimate must not invalidate a previously confirmed hourly quote")
+	}
 	req := orderCloudRequest{
-		OperationID: testVirtuaOrderID, Zone: "par01fr", Country: "FR", Plan: plans[0].Code, Quote: quote.ID,
+		OperationID: testVirtuaOrderID, Zone: "par01fr", Country: "FR", Plan: plan.Code, Quote: quote.ID,
 		SSHUser: "root", SSHKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		EnrollURL: "https://guard.example.com/api/server-orders/" + testVirtuaOrderID + "/enroll", EnrollToken: strings.Repeat("a", 43),
 	}
