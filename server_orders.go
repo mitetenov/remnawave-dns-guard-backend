@@ -14,6 +14,28 @@ import (
 	"time"
 )
 
+const (
+	upCloudOrderProvider = "upcloud"
+	virtuaOrderProvider  = "virtua"
+)
+
+func orderProviderName(provider string) string {
+	if provider == virtuaOrderProvider {
+		return "Virtua.Cloud"
+	}
+	return "UpCloud"
+}
+
+func validOrderZone(provider, zone string) bool {
+	switch provider {
+	case "", upCloudOrderProvider:
+		return upCloudOrderZonePattern.MatchString(zone)
+	case virtuaOrderProvider:
+		return virtuaZonePattern.MatchString(zone)
+	}
+	return false
+}
+
 type orderChoice struct {
 	ID     string `json:"id"`
 	Label  string `json:"label"`
@@ -26,6 +48,7 @@ type orderSelection struct {
 	PoolID    string `json:"pool_id"`
 	Group     string `json:"group"`
 	ProfileID string `json:"profile_id"`
+	Provider  string `json:"provider,omitempty"`
 }
 
 type orderInstaller interface {
@@ -36,18 +59,19 @@ type orderInstaller interface {
 }
 
 type orderManager struct {
-	a         *App
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	mu        sync.Mutex
-	cloud     func() (orderCloudProvider, error)
-	installer orderInstaller
-	sshUser   string
+	a             *App
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	mu            sync.Mutex
+	cloud         func() (orderCloudProvider, error)
+	virtuaCatalog virtuaCatalogCache
+	installer     orderInstaller
+	sshUser       string
 }
 
 var orderStages = map[string]string{
-	"preflight": "Проверка заказа", "provision": "Создание сервера в UpCloud",
+	"preflight": "Проверка заказа", "provision": "Создание сервера у хостинга",
 	"enrollment": "Ожидание SSH-ключа сервера", "origin": "Настройка домена ноды",
 	"panel": "Регистрация ноды в Remnawave", "ansible": "Установка и настройка ноды",
 	"target": "Добавление в DNS Guard", "verify": "Проверка доступности и публикация DNS",
@@ -71,6 +95,9 @@ func (s *Store) initializeOrders() {
  snapshot TEXT,enroll_digest TEXT,host_key TEXT,create_attempted INTEGER NOT NULL DEFAULT 0,
  can_retry_create INTEGER NOT NULL DEFAULT 0,server_uuid TEXT,ip TEXT,node_uuid TEXT,target_id TEXT,
  error TEXT,next_retry REAL NOT NULL DEFAULT 0, UNIQUE(country,serial))`)
+	if !slices.ContainsFunc(s.all("PRAGMA table_info(server_orders)"), func(column row) bool { return column["name"] == "provider" }) {
+		s.exec("ALTER TABLE server_orders ADD COLUMN provider TEXT NOT NULL DEFAULT 'upcloud'")
+	}
 	s.exec("CREATE INDEX IF NOT EXISTS server_orders_target ON server_orders(target_id)")
 }
 
@@ -88,6 +115,22 @@ func newOrderManager(a *App) *orderManager {
 			}
 			return newUpCloudOrder(a.client, token), nil
 		}}
+}
+
+func (m *orderManager) cloudFor(provider string) (orderCloudProvider, error) {
+	switch provider {
+	case "", upCloudOrderProvider:
+		return m.cloud()
+	case virtuaOrderProvider:
+		var token string
+		m.a.withStore(func() any { token = m.a.s.get("virtua_token"); return nil })
+		if token == "" {
+			return nil, errors.New("сохраните API-токен Virtua.Cloud в разделе «Серверы»")
+		}
+		return &virtuaOrder{client: providerClient(m.a.client), token: token, cache: &m.virtuaCatalog}, nil
+	default:
+		return nil, errors.New("выберите доступный хостинг")
+	}
 }
 
 func (m *orderManager) start() {
@@ -131,6 +174,13 @@ func orderPlanChoice(zone string, p orderCloudPlan) orderChoice {
 
 	data, _ := json.Marshal(p)
 	id := p.Code + "@" + digest(zone + " " + string(data))[:16]
+	if p.Country != "" {
+		return orderChoice{
+			ID: id,
+			Label: fmt.Sprintf("%s · %d vCPU · %d МиБ RAM · %d ГиБ %s · %.10g %s/ч без НДС",
+				p.Name, p.CPU, p.MemoryMB, p.StorageGB, p.StorageTier, p.Price, p.Currency),
+		}
+	}
 	family := p.Family
 	if !oneOf(family, "starter", "premium") {
 		family = ""
@@ -142,7 +192,7 @@ func orderPlanChoice(zone string, p orderCloudPlan) orderChoice {
 	}
 }
 
-func (m *orderManager) options(ctx context.Context, kind, zone, poolID, group string) ([]orderChoice, error) {
+func (m *orderManager) options(ctx context.Context, kind, zone, poolID, group, provider string) ([]orderChoice, error) {
 	choices := []orderChoice{}
 	switch kind {
 	case "zone", "plan":
@@ -152,13 +202,13 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID, group st
 				return nil, err
 			}
 		}
-		c, err := m.cloud()
+		c, err := m.cloudFor(provider)
 		if err != nil {
 			return nil, err
 		}
 		if kind == "plan" {
-			if !upCloudOrderZonePattern.MatchString(zone) {
-				return nil, errors.New("выберите локацию UpCloud")
+			if !validOrderZone(provider, zone) {
+				return nil, errors.New("выберите локацию хостинга")
 			}
 			plans, err := c.Plans(ctx, zone)
 			if err != nil {
@@ -233,6 +283,10 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID, group st
 }
 
 func selectionDigest(sel orderSelection) string {
+	// Keep request fingerprints for old UpCloud orders and pending clients.
+	if sel.Provider == upCloudOrderProvider {
+		sel.Provider = ""
+	}
 	data, _ := json.Marshal(sel)
 	return digest(string(data))
 }
@@ -244,8 +298,8 @@ func matchOrderRequest(j row, sel orderSelection) (string, error) {
 	return str(j["id"]), nil
 }
 
-func (m *orderManager) selectedPlan(ctx context.Context, zone, quote string) (orderCloudPlan, error) {
-	c, err := m.cloud()
+func (m *orderManager) selectedPlan(ctx context.Context, provider, zone, quote string) (orderCloudPlan, error) {
+	c, err := m.cloudFor(provider)
 	if err != nil {
 		return orderCloudPlan{}, err
 	}
@@ -253,6 +307,10 @@ func (m *orderManager) selectedPlan(ctx context.Context, zone, quote string) (or
 	if err != nil {
 		return orderCloudPlan{}, err
 	}
+	return matchOrderQuote(zone, quote, plans)
+}
+
+func matchOrderQuote(zone, quote string, plans []orderCloudPlan) (orderCloudPlan, error) {
 	for _, p := range plans {
 		if orderPlanChoice(zone, p).ID == quote {
 			return p, nil
@@ -271,8 +329,11 @@ func (m *orderManager) checkOrderGroup(ctx context.Context, group string) error 
 
 func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSelection) (string, error) {
 	requestID, ok := canonicalUUID(requestID)
-	if !ok || !upCloudOrderZonePattern.MatchString(sel.Zone) || !oneOf(sel.Group, "nodes", "nodes_wl") {
+	if !ok || !validOrderZone(sel.Provider, sel.Zone) || !oneOf(sel.Group, "nodes", "nodes_wl") {
 		return "", errors.New("проверьте локацию и тип ноды")
+	}
+	if sel.Provider == "" {
+		sel.Provider = upCloudOrderProvider
 	}
 	s := m.a.s
 	var prev row
@@ -289,7 +350,7 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 	if err := m.checkOrderGroup(ctx, sel.Group); err != nil {
 		return "", err
 	}
-	plan, err := m.selectedPlan(ctx, sel.Zone, sel.Plan)
+	plan, err := m.selectedPlan(ctx, sel.Provider, sel.Zone, sel.Plan)
 	if err != nil {
 		return "", err
 	}
@@ -319,7 +380,10 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 	for _, n := range nodes {
 		names[strings.ToLower(str(n["name"]))] = true
 	}
-	country := strings.ToUpper(sel.Zone[:2])
+	country := plan.Country
+	if sel.Provider == upCloudOrderProvider {
+		country = strings.ToUpper(sel.Zone[:2])
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if j := s.one("SELECT id,selection_hash FROM server_orders WHERE request_id=?", requestID); j != nil {
@@ -341,8 +405,8 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 			continue
 		}
 		id, stamp := uid(), iso(time.Now())
-		s.exec(`INSERT INTO server_orders(id,request_id,selection_hash,pool_id,pool_hostname,zone_id,ttl,zone,country,plan,quote,group_name,profile_id,profile_name,inbounds,serial,alias,domain,created_at,updated_at)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, requestID, selectionDigest(sel), sel.PoolID, p["hostname"], p["zone_id"], p["ttl"], sel.Zone, country, plan.Code, sel.Plan, sel.Group, profile.ID, profile.Name, string(encoded), serial, alias, domain, stamp, stamp)
+		s.exec(`INSERT INTO server_orders(id,request_id,selection_hash,pool_id,pool_hostname,zone_id,ttl,zone,country,plan,quote,group_name,profile_id,profile_name,inbounds,serial,alias,domain,created_at,updated_at,provider)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, requestID, selectionDigest(sel), sel.PoolID, p["hostname"], p["zone_id"], p["ttl"], sel.Zone, country, plan.Code, sel.Plan, sel.Group, profile.ID, profile.Name, string(encoded), serial, alias, domain, stamp, stamp, sel.Provider)
 		return id, nil
 	}
 }

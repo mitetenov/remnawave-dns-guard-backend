@@ -34,11 +34,11 @@ func TestOrderOptionsCheckSetupBeforeLookingUpChoices(t *testing.T) {
 			return groupErr
 		}},
 	}
-	if choices, err := manager.options(t.Context(), "zone", "", "", ""); len(choices) != 0 ||
+	if choices, err := manager.options(t.Context(), "zone", "", "", "", ""); len(choices) != 0 ||
 		!errors.Is(err, configErr) || !strings.Contains(err.Error(), "PUBLIC_ORIGIN") {
 		t.Fatalf("expected both setup errors before location lookup, got %v, %v", choices, err)
 	}
-	if choices, err := manager.options(t.Context(), "profile", "", "", "nodes_wl"); len(choices) != 0 || !errors.Is(err, groupErr) {
+	if choices, err := manager.options(t.Context(), "profile", "", "", "nodes_wl", ""); len(choices) != 0 || !errors.Is(err, groupErr) {
 		t.Fatalf("expected the group error before profile lookup, got %v, %v", choices, err)
 	}
 }

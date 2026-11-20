@@ -12,7 +12,7 @@ func (m *orderManager) runOnce() {
 	defer m.mu.Unlock()
 	var jobs []row
 	m.a.withStore(func() any {
-		jobs = m.a.s.all("SELECT * FROM server_orders WHERE "+orderActive+" AND next_retry<=? ORDER BY created_at", nowSeconds())
+		jobs = m.a.s.all("SELECT * FROM server_orders WHERE ("+orderActive+" OR (provider='virtua' AND stage IN ('cancelled','rejected') AND snapshot IS NOT NULL)) AND next_retry<=? ORDER BY created_at", nowSeconds())
 		return nil
 	})
 	for _, j := range jobs {
@@ -116,7 +116,7 @@ func (m *orderManager) preflight(j row) error {
 	if err = panel.checkOrderHosts(ctx, str(j["pool_hostname"]), ids); err != nil {
 		return err
 	}
-	c, err := m.cloud()
+	c, err := m.cloudFor(str(j["provider"]))
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func (m *orderManager) preflight(j row) error {
 		return err
 	}
 	if zone != j["zone"] {
-		return errors.New("UpCloud вернул другую локацию для заказа")
+		return errors.New("хостинг вернул другую локацию для заказа")
 	}
 	m.advance(j, "provision", func() {
 		s.exec("UPDATE server_orders SET snapshot=?,enroll_digest=? WHERE id=?", s.cipher.encrypt(snapshot), digest(token), j["id"])
@@ -137,16 +137,26 @@ func (m *orderManager) preflight(j row) error {
 
 func (m *orderManager) provision(j row) error {
 	s := m.a.s
-	c, err := m.cloud()
+	c, err := m.cloudFor(str(j["provider"]))
 	if err != nil {
 		return err
 	}
 	raw, err := s.cipher.decrypt(str(j["snapshot"]))
 	if err != nil {
-		return errors.New("не удалось прочитать сохранённый заказ UpCloud")
+		return errors.New("не удалось прочитать сохранённый заказ")
 	}
 	if !truth(j["create_attempted"]) {
-		if _, err = m.selectedPlan(m.ctx, str(j["zone"]), str(j["quote"])); err != nil {
+		zone := str(j["zone"])
+		var plans []orderCloudPlan
+		if virtua, ok := c.(*virtuaOrder); ok {
+			plans, err = virtua.zonePlans(m.ctx, zone, true)
+		} else {
+			plans, err = c.Plans(m.ctx, zone)
+		}
+		if err != nil {
+			return err
+		}
+		if _, err = matchOrderQuote(zone, str(j["quote"]), plans); err != nil {
 			return err
 		}
 	}
@@ -157,10 +167,10 @@ func (m *orderManager) provision(j row) error {
 		n, err := res.RowsAffected()
 		return n == 1, err
 	}
-	server, ip, err := c.ProvisionOrder(m.ctx, raw, str(j["id"]), claim)
+	server, ip, err := c.ProvisionOrder(m.ctx, raw, str(j["id"]), str(j["server_uuid"]), claim)
 	if server != "" {
 		if _, ok := canonicalUUID(server); !ok || (j["server_uuid"] != nil && j["server_uuid"] != server) {
-			return errors.New("идентификатор сервера UpCloud не совпадает с сохранённым заказом")
+			return errors.New("идентификатор сервера не совпадает с сохранённым заказом")
 		}
 		m.a.withStore(func() any {
 			s.exec("UPDATE server_orders SET server_uuid=?,can_retry_create=0 WHERE id=? AND stage='provision' AND create_attempted=1 AND (server_uuid IS NULL OR server_uuid=?)", server, j["id"], server)
@@ -176,10 +186,10 @@ func (m *orderManager) provision(j row) error {
 		return err
 	}
 	if _, ok := canonicalUUID(server); !ok || !publicIPv4(ip) {
-		return errors.New("UpCloud не подтвердил UUID сервера и публичный IPv4")
+		return errors.New("хостинг не подтвердил UUID сервера и публичный IPv4")
 	}
 	m.advance(j, "enrollment", func() {
-		s.exec("UPDATE server_orders SET server_uuid=?,ip=?,snapshot=NULL WHERE id=?", server, ip, j["id"])
+		s.exec("UPDATE server_orders SET server_uuid=?,ip=?,snapshot=CASE WHEN provider='virtua' THEN snapshot ELSE NULL END WHERE id=?", server, ip, j["id"])
 	})
 	return nil
 }
@@ -188,7 +198,7 @@ func (m *orderManager) stopUnplaced(j row, stage string, reason error) {
 	s := m.a.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.exec(`UPDATE server_orders SET stage=?,updated_at=?,error=?,enroll_digest=NULL,snapshot=NULL,can_retry_create=0
+	s.exec(`UPDATE server_orders SET stage=?,updated_at=?,error=?,enroll_digest=NULL,snapshot=CASE WHEN provider='virtua' THEN snapshot ELSE NULL END,can_retry_create=0
  WHERE id=? AND stage=? AND server_uuid IS NULL AND host_key IS NULL AND (create_attempted=0 OR ?='rejected')`, stage, iso(time.Now()), reason.Error(), j["id"], j["stage"], stage)
 }
 
@@ -196,6 +206,16 @@ func (m *orderManager) step(j row) error {
 	a, s := m.a, m.a.s
 	ctx := m.ctx
 	switch j["stage"] {
+	case "cancelled", "rejected":
+		if err := m.cleanupOrderScript(j); err != nil {
+			// Preserve the reason the order ended while retrying script cleanup.
+			a.withStore(func() any {
+				s.exec("UPDATE server_orders SET next_retry=? WHERE id=?", nowSeconds()+300, j["id"])
+				return nil
+			})
+			return nil
+		}
+		a.withStore(func() any { s.exec("UPDATE server_orders SET snapshot=NULL WHERE id=?", j["id"]); return nil })
 	case "preflight":
 		return m.preflight(j)
 	case "provision":
@@ -204,7 +224,10 @@ func (m *orderManager) step(j row) error {
 		if !truth(j["host_key"]) {
 			return errReplacementPending
 		}
-		m.advance(j, "origin", nil)
+		if err := m.cleanupOrderScript(j); err != nil {
+			return err
+		}
+		m.advance(j, "origin", func() { s.exec("UPDATE server_orders SET snapshot=NULL WHERE id=?", j["id"]) })
 	case "origin":
 		a.reconciler.dnsMu.Lock()
 		defer a.reconciler.dnsMu.Unlock()
@@ -254,7 +277,8 @@ func (m *orderManager) enrollTarget(j row) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.one("SELECT id FROM targets WHERE ip=? OR dns_new_ip=? OR lower(remnawave_uuid)=?", j["ip"], j["ip"], j["node_uuid"]) != nil ||
-		s.one("SELECT target_id FROM replacement_bindings WHERE provider='upcloud' AND server_uuid=?", j["server_uuid"]) != nil {
+		s.one("SELECT target_id FROM replacement_bindings WHERE provider=? AND server_uuid=?", j["provider"], j["server_uuid"]) != nil ||
+		s.one("SELECT id FROM server_orders WHERE provider=? AND server_uuid=? AND id!=? AND target_id IS NOT NULL", j["provider"], j["server_uuid"], j["id"]) != nil {
 		return errors.New("сервер, IP или нода уже привязаны к другой цели")
 	}
 	id := uid()
@@ -291,8 +315,10 @@ func (m *orderManager) finish(j row) error {
 		return err
 	}
 	m.advance(j, "complete", func() {
-		s.exec("INSERT INTO replacement_bindings(target_id,provider,server_uuid,node_uuid,enabled) VALUES(?,'upcloud',?,?,1)", j["target_id"], j["server_uuid"], j["node_uuid"])
-		s.event("info", "system", "Сервер UpCloud развёрнут и включён в пул", j["pool_id"], j["target_id"])
+		if str(j["provider"]) != virtuaOrderProvider {
+			s.exec("INSERT INTO replacement_bindings(target_id,provider,server_uuid,node_uuid,enabled) VALUES(?,'upcloud',?,?,1)", j["target_id"], j["server_uuid"], j["node_uuid"])
+		}
+		s.event("info", "system", "Сервер "+orderProviderName(str(j["provider"]))+" развёрнут и включён в пул", j["pool_id"], j["target_id"])
 	})
 	return nil
 }
@@ -311,4 +337,23 @@ func (m *orderManager) checkDomainZone(j row) error {
 		return err
 	}
 	return c.checkOrderOriginZone(str(j["domain"]), str(j["zone_id"]))
+}
+
+func (m *orderManager) cleanupOrderScript(j row) error {
+	if j["provider"] != virtuaOrderProvider || !truth(j["snapshot"]) {
+		return nil
+	}
+	raw, err := m.a.s.cipher.decrypt(str(j["snapshot"]))
+	if err != nil {
+		return errors.New("не удалось прочитать скрипт сохранённого заказа Virtua.Cloud")
+	}
+	snap, err := readVirtuaSnapshot(raw, str(j["id"]))
+	if err != nil {
+		return err
+	}
+	cloud, err := m.cloudFor(virtuaOrderProvider)
+	if err != nil {
+		return err
+	}
+	return cloud.(*virtuaOrder).cleanupScript(m.ctx, snap)
 }
