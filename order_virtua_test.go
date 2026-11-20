@@ -170,6 +170,23 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 	}
 }
 
+func TestVirtuaOrderResponseDiagnostics(t *testing.T) {
+	for _, tc := range []struct{ reply, want string }{
+		{`{"success":true,"systems":[{"version":{"private":"provider-secret"}}]}`, "поле systems.0.version: тип object"},
+		{`{"systems":[],"private":"provider-secret"}`, "отсутствует обязательный признак success"},
+		{`<html>provider-secret`, "некорректный JSON"},
+	} {
+		c := &virtuaOrder{token: "auth-secret", client: &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(tc.reply))}, nil
+		})}}
+		_, err := c.image(t.Context(), 40)
+		if err == nil || !strings.Contains(err.Error(), "GET /v1/cloud/systems (HTTP 200)") ||
+			!strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "secret") {
+			t.Errorf("unexpected diagnostic: %v", err)
+		}
+	}
+}
+
 func TestVirtuaOrderRecognizesOnlyDocumentedRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		status   int

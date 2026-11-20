@@ -99,6 +99,7 @@ func (s *Store) initializeOrders() {
 		s.exec("ALTER TABLE server_orders ADD COLUMN provider TEXT NOT NULL DEFAULT 'upcloud'")
 	}
 	s.exec("CREATE INDEX IF NOT EXISTS server_orders_target ON server_orders(target_id)")
+	s.initializeOrderLogs()
 }
 
 func newOrderManager(a *App) *orderManager {

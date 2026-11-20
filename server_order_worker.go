@@ -163,7 +163,7 @@ func (m *orderManager) provision(j row) error {
 	claim := func() (bool, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		res := s.exec("UPDATE server_orders SET create_attempted=1,can_retry_create=0 WHERE id=? AND stage='provision' AND create_attempted=0 AND server_uuid IS NULL AND host_key IS NULL", j["id"])
+		res := s.exec("UPDATE server_orders SET create_attempted=1,can_retry_create=0,updated_at=? WHERE id=? AND stage='provision' AND create_attempted=0 AND server_uuid IS NULL AND host_key IS NULL", iso(time.Now()), j["id"])
 		n, err := res.RowsAffected()
 		return n == 1, err
 	}
