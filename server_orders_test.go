@@ -43,6 +43,13 @@ func TestOrderOptionsCheckSetupBeforeLookingUpChoices(t *testing.T) {
 	}
 }
 
+func TestOrderEnrollmentOriginRejectsEmptyQuery(t *testing.T) {
+	manager := &orderManager{a: &App{config: Config{PublicOrigin: "https://guard.example.test?"}}}
+	if base, err := manager.enrollmentOrigin(); base != nil || err == nil || !strings.Contains(err.Error(), "PUBLIC_ORIGIN") {
+		t.Fatalf("expected an origin validation error, got %v, %v", base, err)
+	}
+}
+
 func TestOrderQuoteTracksZonePriceAndConfiguration(t *testing.T) {
 	plan := orderCloudPlan{Code: "STARTER-2xCPU-2GB", Family: "starter", CPU: 2, MemoryMB: 2048, StorageGB: 30, StorageTier: "standard", Price: 0.01, Currency: "EUR"}
 	original := orderPlanChoice("fi-hel1", plan)
