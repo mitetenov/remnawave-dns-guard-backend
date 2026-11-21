@@ -229,7 +229,7 @@ func (c *virtuaOrder) image(ctx context.Context, diskGB int) (string, error) {
 	if minRequired > 0 {
 		return "", fmt.Errorf("Virtua.Cloud: для Debian 13 нужен диск от %d ГиБ, на выбранном тарифе %d ГиБ", minRequired, diskGB)
 	}
-	return "", errors.New("В каталоге Virtua.Cloud не найден образ Debian 13")
+	return "", errors.New("Virtua.Cloud не вернул подходящий образ Debian 13")
 }
 
 type virtuaOrderSnapshot struct {

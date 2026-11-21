@@ -204,7 +204,7 @@ func TestVirtuaOrderImageDiskRequirement(t *testing.T) {
 		{name: "prefer a known fit", systems: unknown + "," + fits, diskGB: 40, wantID: "fits"},
 		{name: "let Virtua validate an unknown minimum", systems: large + "," + unknown, diskGB: 40, wantID: "unknown"},
 		{name: "report the smallest explicit minimum", systems: large + "," + fits, diskGB: 20, wantError: "Virtua.Cloud: для Debian 13 нужен диск от 40 ГиБ, на выбранном тарифе 20 ГиБ"},
-		{name: "reject Windows and applications", systems: windows + "," + app, diskGB: 40, wantError: "В каталоге Virtua.Cloud не найден образ Debian 13"},
+		{name: "reject Windows and applications", systems: windows + "," + app, diskGB: 40, wantError: "Virtua.Cloud не вернул подходящий образ Debian 13"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &virtuaOrder{client: &http.Client{Transport: roundTripFunc(func(_ *http.Request) (*http.Response, error) {
