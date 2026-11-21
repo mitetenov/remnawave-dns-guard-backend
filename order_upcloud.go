@@ -439,8 +439,8 @@ func (c *upCloudOrder) verifyDisk(ctx context.Context, snap upCloudOrderSnapshot
 		!slices.Contains(disk.Labels, upCloudLabel{Key: upCloudOrderImageLabel, Value: snap.TemplateID}) {
 		return errors.New("UpCloud order disk does not match the requested image and plan")
 	}
-	if disk.State == "maintenance" {
-		return fmt.Errorf("%w: waiting for the ordered UpCloud storage to finish cloning", errReplacementPending)
+	if oneOf(disk.State, "maintenance", "cloning", "backuping", "attaching", "syncing") {
+		return fmt.Errorf("%w: waiting for the ordered UpCloud storage to become ready", errReplacementPending)
 	}
 	if disk.State != "online" {
 		return errors.New("UpCloud order disk is not ready")

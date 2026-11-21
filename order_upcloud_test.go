@@ -26,6 +26,7 @@ type testOrderUpCloud struct {
 	t              *testing.T
 	serverExists   bool
 	providerStatus string
+	diskState      string
 	loseCreate     bool
 	badDisk        bool
 	wrongIPOwner   bool
@@ -39,7 +40,7 @@ type testOrderUpCloud struct {
 
 func fakeOrderUpCloud(t *testing.T) (*testOrderUpCloud, orderCloudProvider) {
 	t.Helper()
-	f := &testOrderUpCloud{t: t, providerStatus: "started", templateSize: 10, planPrice: 3.5}
+	f := &testOrderUpCloud{t: t, providerStatus: "started", diskState: "online", templateSize: 10, planPrice: 3.5}
 	return f, newUpCloudOrder(&http.Client{Transport: roundTripFunc(f.request)}, "test-token")
 }
 
@@ -176,7 +177,7 @@ func (f *testOrderUpCloud) request(req *http.Request) (*http.Response, error) {
 		}
 		return response(row{"storage": row{
 			"uuid": testOrderDisk, "access": "private", "type": "normal", "zone": "de-fra1", "size": 50,
-			"tier": "maxiops", "encrypted": "yes", "state": "online", "servers": row{"server": []string{testOrderVM}},
+			"tier": "maxiops", "encrypted": "yes", "state": f.diskState, "servers": row{"server": []string{testOrderVM}},
 			"labels": []upCloudLabel{{upCloudOrderLabel, operation}, {upCloudOrderImageLabel, testOrderTemplate}},
 		}}, 200), nil
 	case "GET /ip_address/" + testOrderIP:
@@ -310,7 +311,20 @@ func TestUpCloudOrderRecoversCreateAndVerifiesDiskAndIPv4(t *testing.T) {
 	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); !errors.Is(err, errReplacementPending) {
 		t.Fatalf("expected maintenance state to retry, got %v", err)
 	}
-	f.providerStatus, f.badDisk = "started", true
+	f.providerStatus = "started"
+	for _, state := range []string{"syncing", "maintenance", "cloning", "backuping", "attaching"} {
+		f.diskState = state
+		id, ip, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, testOrderVM, claim)
+		if id != testOrderVM || ip != "" || !errors.Is(err, errReplacementPending) {
+			t.Fatalf("expected disk in %q to retry without confirming an address, got (%s, %s, %v)", state, id, ip, err)
+		}
+	}
+	f.diskState = "error"
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, testOrderVM, claim); err == nil || errors.Is(err, errReplacementPending) {
+		t.Fatalf("expected an inaccessible disk to report a failure, got %v", err)
+	}
+	f.diskState = "online"
+	f.badDisk = true
 	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); err == nil {
 		t.Fatal("adopted a server with a disk from a different order")
 	}
