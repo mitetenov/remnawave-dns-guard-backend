@@ -74,8 +74,8 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 			script = strings.TrimSuffix(fields.Get("content"), "\n")
 			return ok(row{})
 		case "DELETE /v1/script":
-			if fields.Get("uuid") != testVirtuaScript {
-				t.Fatal("incorrect cleanup script UUID")
+			if r.URL.Query().Get("uuid") != testVirtuaScript || r.Body != nil {
+				t.Fatal("cleanup must send the script UUID in the query string")
 			}
 			script = ""
 			return ok(row{})

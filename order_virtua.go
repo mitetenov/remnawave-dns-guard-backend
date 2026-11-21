@@ -336,7 +336,7 @@ func (c *virtuaOrder) cleanupScript(ctx context.Context, snap virtuaOrderSnapsho
 		return err
 	}
 	for _, id := range ids {
-		if _, err = c.request(ctx, http.MethodDelete, "/script", url.Values{"uuid": {id}}, nil); err != nil {
+		if _, err = c.request(ctx, http.MethodDelete, "/script?uuid="+url.QueryEscape(id), nil, nil); err != nil {
 			return err
 		}
 	}
