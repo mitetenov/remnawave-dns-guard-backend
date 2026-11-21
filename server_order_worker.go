@@ -65,7 +65,8 @@ func orderInbounds(j row) ([]string, error) {
 
 func (m *orderManager) enrollmentOrigin() (*url.URL, error) {
 	base, err := url.Parse(m.a.config.PublicOrigin)
-	if err != nil || base.Scheme != "https" || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
+	if err != nil || base.Scheme != "https" || base.Hostname() == "" || base.User != nil ||
+		base.ForceQuery || base.RawQuery != "" || base.Fragment != "" || base.Path != "" {
 		return nil, errors.New("укажите доступный по HTTPS PUBLIC_ORIGIN для регистрации SSH-ключа сервера")
 	}
 	return base, nil
