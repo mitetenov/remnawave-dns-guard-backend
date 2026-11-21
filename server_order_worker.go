@@ -207,6 +207,8 @@ func (m *orderManager) step(j row) error {
 	a, s := m.a, m.a.s
 	ctx := m.ctx
 	switch j["stage"] {
+	case "deleting":
+		return m.deleteOrderResources(j)
 	case "cancelled", "rejected":
 		if err := m.cleanupOrderScript(j); err != nil {
 			// Preserve the reason the order ended while retrying script cleanup.

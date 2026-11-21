@@ -148,6 +148,9 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 		if t == nil || t["dns_action"] == nil {
 			return nil, nil, false
 		}
+		if s.one("SELECT id FROM server_orders WHERE target_id=? AND stage='deleting' AND (delete_pending & ?) != 0", targetID, orderDeleteDNS) != nil {
+			return nil, nil, false
+		}
 		p := s.one("SELECT * FROM pools WHERE id=?", t["pool_id"])
 		action := str(t["dns_action"])
 		if oneOf(action, "enroll", "enable") || strings.HasPrefix(action, "auto_") {

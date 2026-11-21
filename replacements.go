@@ -102,7 +102,7 @@ func replacementDue(since any, now float64) bool {
 
 func (s *Store) observeReplacement(t, p row, summary probeSummary, now float64) {
 	b := s.one("SELECT * FROM replacement_bindings WHERE target_id=? AND enabled=1", t["id"])
-	if b == nil {
+	if b == nil || s.one("SELECT id FROM server_orders WHERE target_id=? AND stage='deleting'", t["id"]) != nil {
 		return
 	}
 	if !replacementBlocked(t, p, summary) {

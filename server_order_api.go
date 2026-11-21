@@ -31,16 +31,30 @@ func serverOrderError(err error) {
 func (a *App) orderRoutes() {
 	a.route("GET /api/server-orders", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
-			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,create_attempted,can_retry_create
- FROM server_orders WHERE ` + orderActive + ` OR id IN (SELECT id FROM server_orders ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC`)
+			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,create_attempted,can_retry_create,deleted_resources
+ FROM server_orders WHERE ` + orderActive + ` OR stage='complete' OR id IN (SELECT id FROM server_orders ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC`)
 			for _, j := range jobs {
 				j["can_cancel"] = orderStageCancellable(j)
 				j["can_retry_create"] = truth(j["can_retry_create"])
+				deleted := int(num(j["deleted_resources"]))
+				j["deleted_resources"] = orderDeletionOptions{
+					Hosting: deleted&orderDeleteHosting != 0, Remnawave: deleted&orderDeleteRemnawave != 0, DNS: deleted&orderDeleteDNS != 0,
+				}
 				delete(j, "create_attempted")
 			}
 			pools := a.s.all(`SELECT p.id,p.name,p.hostname,COALESCE(t.domain_template,'') AS domain_template FROM pools p LEFT JOIN server_order_templates t ON p.id=t.pool_id ORDER BY p.name,p.hostname`)
 			return row{"orders": jobs, "pools": pools, "stages": orderStages, "virtua_configured": a.s.get("virtua_token") != ""}
 		})
+	})
+	a.route("DELETE /api/server-orders/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		var data orderDeletionOptions
+		bodyObject(w, r, &data, []string{"hosting", "remnawave", "dns"})
+		selected := data.mask()
+		if selected == 0 {
+			invalid("request")
+		}
+		a.orders.queueDeletion(r.PathValue("id"), selected)
+		return row{"ok": true}
 	})
 	a.route("GET /api/server-orders/{id}/logs", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {

@@ -76,11 +76,12 @@ var orderStages = map[string]string{
 	"panel": "Регистрация ноды в Remnawave", "ansible": "Установка и настройка ноды",
 	"target": "Добавление в DNS Guard", "verify": "Проверка доступности и публикация DNS",
 	"complete": "Готово", "cancelled": "Отменён", "rejected": "Провайдер отклонил заказ",
+	"deleting": "Удаление", "deleted": "Удалён",
 }
 
 var errOrderQuoteChanged = errors.New("тариф, его цена или характеристики изменились. Выберите актуальный тариф и подтвердите новый заказ")
 
-const orderActive = "stage NOT IN ('complete','cancelled','rejected')"
+const orderActive = "stage NOT IN ('complete','cancelled','rejected','deleted')"
 
 func (s *Store) initializeOrders() {
 	s.exec(`CREATE TABLE IF NOT EXISTS server_order_templates(
@@ -95,8 +96,14 @@ func (s *Store) initializeOrders() {
  snapshot TEXT,enroll_digest TEXT,host_key TEXT,create_attempted INTEGER NOT NULL DEFAULT 0,
  can_retry_create INTEGER NOT NULL DEFAULT 0,server_uuid TEXT,ip TEXT,node_uuid TEXT,target_id TEXT,
  error TEXT,next_retry REAL NOT NULL DEFAULT 0, UNIQUE(country,serial))`)
-	if !slices.ContainsFunc(s.all("PRAGMA table_info(server_orders)"), func(column row) bool { return column["name"] == "provider" }) {
+	columns := s.all("PRAGMA table_info(server_orders)")
+	if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == "provider" }) {
 		s.exec("ALTER TABLE server_orders ADD COLUMN provider TEXT NOT NULL DEFAULT 'upcloud'")
+	}
+	for _, name := range []string{"delete_pending", "deleted_resources"} {
+		if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == name }) {
+			s.exec("ALTER TABLE server_orders ADD COLUMN " + name + " INTEGER NOT NULL DEFAULT 0")
+		}
 	}
 	s.exec("CREATE INDEX IF NOT EXISTS server_orders_target ON server_orders(target_id)")
 	s.initializeOrderLogs()
