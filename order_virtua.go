@@ -292,13 +292,15 @@ func (c *virtuaOrder) scriptIDs(ctx context.Context, snap virtuaOrderSnapshot) (
 	if scripts.Scripts == nil {
 		return nil, integration("Virtua.Cloud не вернул список скриптов")
 	}
+	// Virtua.Cloud may omit the final newline when saving the script.
+	withoutFinalNewline := strings.TrimSuffix(snap.Script, "\n")
 	var ids []string
 	for _, script := range scripts.Scripts {
 		if script.Name != snap.name() {
 			continue
 		}
 		id, valid := canonicalUUID(script.ID)
-		if !valid || script.Content != snap.Script {
+		if !valid || !oneOf(script.Content, snap.Script, withoutFinalNewline) {
 			return nil, errors.New("найден скрипт Virtua.Cloud с именем заказа и другим содержимым")
 		}
 		ids = append(ids, id)

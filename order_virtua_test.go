@@ -71,7 +71,7 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 			if fields.Get("name") != hostname || !strings.Contains(fields.Get("content"), "dns-guard-enroll.service") {
 				t.Fatal("wrong bootstrap script")
 			}
-			script = fields.Get("content")
+			script = strings.TrimSuffix(fields.Get("content"), "\n")
 			return ok(row{})
 		case "DELETE /v1/script":
 			if fields.Get("uuid") != testVirtuaScript {
@@ -169,6 +169,12 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 	if err != nil || id != testOrderVM || ip != "8.8.4.4" || serverPosts != 1 || scriptPosts != 1 {
 		t.Fatalf("wrong server %q %q after %d server and %d script requests: %v", id, ip, serverPosts, scriptPosts, err)
 	}
+	savedScript := script
+	script += "\nexit 1"
+	if err = c.cleanupScript(ctx, snap); err == nil || script == "" {
+		t.Fatal("cleanup must leave a script with changed content in place")
+	}
+	script = savedScript
 	if err = c.cleanupScript(ctx, snap); err != nil || script != "" {
 		t.Fatalf("bootstrap script cleanup failed: %v", err)
 	}
