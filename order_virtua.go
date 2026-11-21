@@ -341,14 +341,29 @@ func (c *virtuaOrder) cleanupScript(ctx context.Context, snap virtuaOrderSnapsho
 	return nil
 }
 
+// Virtua.Cloud returns server flags as 0 or 1 in addition to JSON booleans.
+type virtuaServerFlag bool
+
+func (f *virtuaServerFlag) UnmarshalJSON(data []byte) error {
+	switch string(data) {
+	case "true", "1":
+		*f = true
+	case "false", "0":
+		*f = false
+	default:
+		return errors.New("expected a boolean or 0/1 for Virtua.Cloud server flag")
+	}
+	return nil
+}
+
 type virtuaServer struct {
-	ID         string `json:"uuid"`
-	Name       string `json:"name"`
-	Label      string `json:"label"`
-	Hostname   string `json:"hostname"`
-	Status     string `json:"status"`
-	Setup      *bool  `json:"is_setup"`
-	Processing *bool  `json:"is_processing"`
+	ID         string            `json:"uuid"`
+	Name       string            `json:"name"`
+	Label      string            `json:"label"`
+	Hostname   string            `json:"hostname"`
+	Status     string            `json:"status"`
+	Setup      *virtuaServerFlag `json:"is_setup"`
+	Processing *virtuaServerFlag `json:"is_processing"`
 }
 
 func (c *virtuaOrder) findServer(ctx context.Context, name string) (string, error) {
