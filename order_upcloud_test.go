@@ -26,9 +26,12 @@ type testOrderUpCloud struct {
 	t              *testing.T
 	serverExists   bool
 	providerStatus string
+	diskState      string
 	loseCreate     bool
 	badDisk        bool
 	wrongIPOwner   bool
+	nicFloating    string
+	detailFloating string
 	closedPlan     bool
 	nativeImage    bool
 	templateSize   int
@@ -39,7 +42,10 @@ type testOrderUpCloud struct {
 
 func fakeOrderUpCloud(t *testing.T) (*testOrderUpCloud, orderCloudProvider) {
 	t.Helper()
-	f := &testOrderUpCloud{t: t, providerStatus: "started", templateSize: 10, planPrice: 3.5}
+	f := &testOrderUpCloud{
+		t: t, providerStatus: "started", diskState: "online", templateSize: 10, planPrice: 3.5,
+		nicFloating: "no", detailFloating: "no",
+	}
 	return f, newUpCloudOrder(&http.Client{Transport: roundTripFunc(f.request)}, "test-token")
 }
 
@@ -154,6 +160,10 @@ func (f *testOrderUpCloud) request(req *http.Request) (*http.Response, error) {
 		return response(row{"server": row{"uuid": testOrderVM}}, 202), nil
 	case "GET /server/" + testOrderVM:
 		spec := exampleUpCloudOrder()
+		publicIP := row{"address": testOrderIP, "family": "IPv4", "dhcp_provided": "yes"}
+		if f.nicFloating != "" {
+			publicIP["floating"] = f.nicFloating
+		}
 		return response(row{"server": row{
 			"uuid": testOrderVM, "hostname": spec.Hostname, "title": spec.Title, "state": f.providerStatus,
 			"zone": "de-fra1", "plan": spec.Plan, "metadata": "yes", "remote_access_enabled": "no",
@@ -162,7 +172,7 @@ func (f *testOrderUpCloud) request(req *http.Request) (*http.Response, error) {
 			"storage_devices": row{"storage_device": []row{{"storage": testOrderDisk, "type": "disk"}}},
 			"networking": row{"interfaces": row{"interface": []row{
 				{"type": "public", "index": 1, "mac": "de:ff:aa:bb:cc:11", "ip_addresses": row{"ip_address": []row{
-					{"address": testOrderIP, "family": "IPv4", "dhcp_provided": "yes", "floating": "no"},
+					publicIP,
 				}}},
 				{"type": "utility", "index": 2, "mac": "de:ff:aa:bb:cc:22", "ip_addresses": row{"ip_address": []row{
 					{"address": "10.1.0.12", "family": "IPv4", "dhcp_provided": "yes"},
@@ -176,7 +186,7 @@ func (f *testOrderUpCloud) request(req *http.Request) (*http.Response, error) {
 		}
 		return response(row{"storage": row{
 			"uuid": testOrderDisk, "access": "private", "type": "normal", "zone": "de-fra1", "size": 50,
-			"tier": "maxiops", "encrypted": "yes", "state": "online", "servers": row{"server": []string{testOrderVM}},
+			"tier": "maxiops", "encrypted": "yes", "state": f.diskState, "servers": row{"server": []string{testOrderVM}},
 			"labels": []upCloudLabel{{upCloudOrderLabel, operation}, {upCloudOrderImageLabel, testOrderTemplate}},
 		}}, 200), nil
 	case "GET /ip_address/" + testOrderIP:
@@ -184,10 +194,14 @@ func (f *testOrderUpCloud) request(req *http.Request) (*http.Response, error) {
 		if f.wrongIPOwner {
 			owner = "0016dadf-eba4-4331-bd34-b4ad841f23e2"
 		}
-		return response(row{"ip_address": row{
+		ip := row{
 			"address": testOrderIP, "server": owner, "zone": "de-fra1", "access": "public",
-			"family": "IPv4", "mac": "de:ff:aa:bb:cc:11", "floating": "no",
-		}}, 200), nil
+			"family": "IPv4", "mac": "de:ff:aa:bb:cc:11",
+		}
+		if f.detailFloating != "" {
+			ip["floating"] = f.detailFloating
+		}
+		return response(row{"ip_address": ip}, 200), nil
 	default:
 		f.t.Fatalf("unexpected UpCloud request %s", path)
 		return nil, nil
@@ -310,7 +324,20 @@ func TestUpCloudOrderRecoversCreateAndVerifiesDiskAndIPv4(t *testing.T) {
 	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); !errors.Is(err, errReplacementPending) {
 		t.Fatalf("expected maintenance state to retry, got %v", err)
 	}
-	f.providerStatus, f.badDisk = "started", true
+	f.providerStatus = "started"
+	for _, state := range []string{"syncing", "maintenance", "cloning", "backuping", "attaching"} {
+		f.diskState = state
+		id, ip, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, testOrderVM, claim)
+		if id != testOrderVM || ip != "" || !errors.Is(err, errReplacementPending) {
+			t.Fatalf("expected disk in %q to retry without confirming an address, got (%s, %s, %v)", state, id, ip, err)
+		}
+	}
+	f.diskState = "error"
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, testOrderVM, claim); err == nil || errors.Is(err, errReplacementPending) {
+		t.Fatalf("expected an inaccessible disk to report a failure, got %v", err)
+	}
+	f.diskState = "online"
+	f.badDisk = true
 	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim); err == nil {
 		t.Fatal("adopted a server with a disk from a different order")
 	}
@@ -319,6 +346,15 @@ func TestUpCloudOrderRecoversCreateAndVerifiesDiskAndIPv4(t *testing.T) {
 		t.Fatal("adopted a server with a public IP owned by another VM")
 	}
 	f.wrongIPOwner = false
+	f.detailFloating = "yes"
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, testOrderVM, claim); err == nil {
+		t.Fatal("adopted an address marked floating in the IP detail")
+	}
+	f.detailFloating, f.nicFloating = "", ""
+	if _, _, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, testOrderVM, claim); err == nil {
+		t.Fatal("adopted an address with no floating status in either response")
+	}
+	f.nicFloating = "no"
 	id, ip, err := upcloud.ProvisionOrder(ctx, snapshot, testOrderID, "", claim)
 	if err != nil || id != testOrderVM || ip != testOrderIP || f.createAttempts != 1 {
 		t.Fatalf("recovered (%s, %s, %v), submitted %d create requests", id, ip, err, f.createAttempts)
