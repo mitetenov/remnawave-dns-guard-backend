@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"encoding/json/jsontext"
@@ -186,21 +187,49 @@ func (c *virtuaOrder) image(ctx context.Context, diskGB int) (string, error) {
 			Version      virtuaSystemVersion `json:"version"`
 			Category     string              `json:"category"`
 			Windows      json.RawMessage     `json:"is_windows"`
-			MinDisk      int                 `json:"min_disk_space"`
+			MinDisk      json.Number         `json:"min_disk_space"`
 		} `json:"systems"`
 	}
 	if _, err := c.request(ctx, http.MethodGet, "/cloud/systems", nil, &list); err != nil {
 		return "", err
 	}
+	if list.Systems == nil {
+		return "", integration("Virtua.Cloud не вернул список образов")
+	}
+	var fallback string
+	var minRequired int64
 	for _, image := range list.Systems {
-		major, _, _ := strings.Cut(string(image.Version), ".")
-		if image.Category == "linux" && image.Distribution == "debian" && major == "13" &&
-			oneOf(string(image.Windows), `"0"`, "0", "false") && image.MinDisk > 0 && image.MinDisk <= diskGB &&
-			virtuaIDPattern.MatchString(image.ID) {
+		major, _, _ := strings.Cut(strings.TrimSpace(string(image.Version)), ".")
+		category := strings.TrimSpace(image.Category)
+		if (category != "" && !strings.EqualFold(category, "linux")) ||
+			!strings.EqualFold(strings.TrimSpace(image.Distribution), "debian") || major != "13" ||
+			!oneOf(string(image.Windows), "", "null", `"0"`, `"false"`, "0", "false") || !virtuaIDPattern.MatchString(image.ID) {
+			continue
+		}
+		minDisk, err := cmp.Or(image.MinDisk, "0").Int64()
+		if err != nil || minDisk < 0 {
+			continue
+		}
+		if minDisk == 0 {
+			// Prefer an image with a known compatible minimum. The order endpoint
+			// validates the disk when the catalog omits this requirement.
+			fallback = cmp.Or(fallback, image.ID)
+			continue
+		}
+		if minDisk <= int64(diskGB) {
 			return image.ID, nil
 		}
+		if minRequired == 0 || minDisk < minRequired {
+			minRequired = minDisk
+		}
 	}
-	return "", errors.New("Virtua.Cloud не предлагает Debian 13 для выбранного размера диска")
+	if fallback != "" {
+		return fallback, nil
+	}
+	if minRequired > 0 {
+		return "", fmt.Errorf("Virtua.Cloud: для Debian 13 нужен диск от %d ГиБ, на выбранном тарифе %d ГиБ", minRequired, diskGB)
+	}
+	return "", errors.New("В каталоге Virtua.Cloud не найден образ Debian 13")
 }
 
 type virtuaOrderSnapshot struct {
