@@ -17,7 +17,7 @@ RUN --mount=type=cache,id=guard-backend-go-build,target=/root/.cache/go-build \
     && chmod 1777 /out/tmp
 
 FROM --platform=$BUILDPLATFORM alpine:3.24 AS ansible
-ARG ANSIBLE_REVISION=d08132cf664ed60174292e09565342dda0e267fb
+ARG ANSIBLE_REVISION=b0da191de3c5227fff4b4df43702fca38ad7771b
 RUN apk add --no-cache ansible-core ca-certificates git
 WORKDIR /opt/dns-guard/ansible
 # Export only node deployment assets. The upstream inventory, vault and

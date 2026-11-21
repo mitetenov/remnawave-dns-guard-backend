@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -137,13 +139,43 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 		t.Fatalf("failed to prepare order: %v", err)
 	}
 	snap, err := readVirtuaSnapshot(data, testVirtuaOrderID)
-	if err != nil || !strings.Contains(snap.Script, req.SSHKey) {
+	if err != nil {
 		t.Fatalf("failed to prepare bootstrap: %v", err)
 	}
-	command := exec.CommandContext(ctx, "bash", "-n")
-	command.Stdin = strings.NewReader(snap.Script)
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state")
+	execDir := filepath.Join(root, "bin")
+	unitDir := filepath.Join(root, "units")
+	staged := strings.NewReplacer(
+		"/var/lib/dns-guard", stateDir,
+		"/usr/local/lib/dns-guard", execDir,
+		"/etc/systemd/system", unitDir,
+		"/run/systemd/system", filepath.Join(root, "offline"),
+	).Replace(snap.Script)
+	command := exec.CommandContext(ctx, "sh")
+	command.Stdin = strings.NewReader(staged)
 	if out, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("bootstrap syntax: %v %s", err, out)
+		t.Fatalf("offline bootstrap staging: %v %s", err, out)
+	}
+	link := filepath.Join(unitDir, "multi-user.target.wants", "dns-guard-enroll.service")
+	if target, err := os.Readlink(link); err != nil || target != "../dns-guard-enroll.service" {
+		t.Fatalf("bootstrap unit was not enabled: %q, %v", target, err)
+	}
+	credentials, err := os.ReadFile(filepath.Join(stateDir, "enroll.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enrollment map[string]string
+	if err := json.Unmarshal(credentials, &enrollment); err != nil || enrollment["token"] != req.EnrollToken || enrollment["url"] != req.EnrollURL {
+		t.Fatal("incorrect enrollment credentials")
+	}
+	runner := filepath.Join(execDir, "bootstrap.sh")
+	setup, err := os.ReadFile(runner)
+	if err != nil || !strings.Contains(string(setup), req.SSHKey) {
+		t.Fatalf("failed to stage SSH setup: %v", err)
+	}
+	if out, err := exec.CommandContext(ctx, "sh", "-n", runner).CombinedOutput(); err != nil {
+		t.Fatalf("offline bootstrap runner syntax: %v %s", err, out)
 	}
 	claim := func() (bool, error) {
 		if claimed {

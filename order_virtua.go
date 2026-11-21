@@ -270,7 +270,8 @@ func readVirtuaSnapshot(data json.RawMessage, id string) (virtuaOrderSnapshot, e
 	orderID, valid := canonicalUUID(id)
 	if err := json.Unmarshal(data, &snap); err != nil || !valid || orderID != id || snap.OperationID != id ||
 		!virtuaZonePattern.MatchString(snap.Zone) || !validVirtuaOffer(snap.Offer) ||
-		!virtuaIDPattern.MatchString(snap.System) || !strings.HasPrefix(snap.Script, "#!/bin/bash\n") {
+		!virtuaIDPattern.MatchString(snap.System) ||
+		(!strings.HasPrefix(snap.Script, "#!/bin/sh\n") && !strings.HasPrefix(snap.Script, "#!/bin/bash\n")) {
 		return snap, errors.New("некорректный сохранённый заказ Virtua.Cloud")
 	}
 	return snap, nil
