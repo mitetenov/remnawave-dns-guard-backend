@@ -41,6 +41,9 @@ func TestVirtuaReplacementRecoversPaidOrderAndPinsNewHostKey(t *testing.T) {
 			}
 			return ok(row{"scripts": scripts})
 		case "DELETE /v1/script":
+			if r.URL.Query().Get("uuid") != testVirtuaScript || r.Body != nil {
+				t.Fatal("cleanup must send the script UUID in the query string")
+			}
 			scriptPresent = false
 			return ok(row{})
 		case "GET /v1/cloud-server":
