@@ -9,6 +9,23 @@ import (
 	"strings"
 )
 
+const virtuaBootstrapUnit = `[Unit]
+Description=Prepare SSH access and register the VPS with DNS Guard
+Wants=network-online.target
+After=network-online.target ssh.service
+ConditionPathExists=/var/lib/dns-guard/enroll.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/dns-guard/bootstrap.sh
+TimeoutStartSec=45min
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target
+`
+
 func virtuaBootstrap(req orderCloudRequest) (string, error) {
 	loginKey, valid := cleanOrderLoginKey(req.SSHKey)
 	endpoint, err := url.Parse(req.EnrollURL)
@@ -23,21 +40,22 @@ func virtuaBootstrap(req orderCloudRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var script strings.Builder
-	script.WriteString(`#!/bin/bash
-set -euo pipefail
+	var bootstrap strings.Builder
+	bootstrap.WriteString(`#!/bin/sh
+set -eu
 umask 077
 export DEBIAN_FRONTEND=noninteractive
 `)
-	fmt.Fprintf(&script, "login_user='%s'\nlogin_key='%s'\n", req.SSHUser, loginKey)
-	script.WriteString(`packages=()
-command -v python3 >/dev/null || packages+=(python3 ca-certificates)
+	fmt.Fprintf(&bootstrap, "login_user='%s'\nlogin_key='%s'\n", req.SSHUser, loginKey)
+	bootstrap.WriteString(`set --
+command -v python3 >/dev/null || set -- "$@" python3
+test -s /etc/ssl/certs/ca-certificates.crt || set -- "$@" ca-certificates
 if [ "$login_user" != root ]; then
-    command -v sudo >/dev/null || packages+=(sudo)
+    command -v sudo >/dev/null || set -- "$@" sudo
 fi
-if [ "${#packages[@]}" -gt 0 ]; then
-    apt-get update
-    apt-get install -y "${packages[@]}"
+if [ "$#" -gt 0 ]; then
+    apt-get -o Acquire::Retries=3 update
+    apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y "$@"
 fi
 if ! id "$login_user" >/dev/null 2>&1; then
     useradd --create-home --shell /bin/bash "$login_user"
@@ -62,14 +80,32 @@ printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'Per
 ssh-keygen -A
 /usr/sbin/sshd -t
 systemctl reload-or-restart ssh.service
+exec /usr/bin/python3 /usr/local/lib/dns-guard/enroll.py
+`)
+	// The provider can run the installer before the guest has network access or
+	// a systemd instance. Write the unit and enable it without contacting PID 1.
+	var script strings.Builder
+	script.WriteString(`#!/bin/sh
+set -eu
+umask 077
+if [ -f /usr/local/lib/dns-guard/bootstrap.sh ] && [ ! -f /var/lib/dns-guard/enroll.json ]; then
+    exit 0
+fi
 install -d -m 0700 /var/lib/dns-guard /usr/local/lib/dns-guard
+install -d -m 0755 /etc/systemd/system/multi-user.target.wants
 `)
 	writeFile := func(path string, data []byte, mode string) {
 		fmt.Fprintf(&script, "printf '%%s' '%s' | base64 -d > %s\nchmod %s %s\n", base64.StdEncoding.EncodeToString(data), path, mode, path)
 	}
 	writeFile("/var/lib/dns-guard/enroll.json", credentials, "0600")
 	writeFile("/usr/local/lib/dns-guard/enroll.py", []byte(orderCloudEnrollScript), "0700")
-	writeFile("/etc/systemd/system/dns-guard-enroll.service", []byte(orderCloudEnrollUnit), "0644")
-	script.WriteString("systemctl daemon-reload\nsystemctl enable --now --no-block dns-guard-enroll.service\n")
+	writeFile("/usr/local/lib/dns-guard/bootstrap.sh", []byte(bootstrap.String()), "0700")
+	writeFile("/etc/systemd/system/dns-guard-enroll.service", []byte(virtuaBootstrapUnit), "0644")
+	script.WriteString(`ln -sfn ../dns-guard-enroll.service /etc/systemd/system/multi-user.target.wants/dns-guard-enroll.service
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl start --no-block dns-guard-enroll.service
+fi
+`)
 	return script.String(), nil
 }
