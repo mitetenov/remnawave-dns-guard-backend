@@ -194,6 +194,7 @@ func TestVirtuaOrderImageDiskRequirement(t *testing.T) {
 		unknown = `{"uuid":"unknown","distribution":"debian","version":13,"is_windows":null,"min_disk_space":null}`
 		fits    = `{"uuid":"fits","category":"linux","distribution":"debian","version":13,"is_windows":"0","min_disk_space":"40"}`
 		large   = `{"uuid":"large","category":"linux","distribution":"debian","version":13,"is_windows":0,"min_disk_space":80}`
+		minimal = `{"uuid":"debian-13-64","name":"Debian 13 (64 bits)","distribution":"debian","version":13,"category":"minimal","is_windows":0,"min_disk_space":20}`
 		windows = `{"uuid":"windows","category":"linux","distribution":"debian","version":13,"is_windows":true,"min_disk_space":10}`
 		app     = `{"uuid":"app","category":"application","distribution":"debian","version":13,"is_windows":false,"min_disk_space":10}`
 	)
@@ -204,6 +205,8 @@ func TestVirtuaOrderImageDiskRequirement(t *testing.T) {
 		{name: "prefer a known fit", systems: unknown + "," + fits, diskGB: 40, wantID: "fits"},
 		{name: "let Virtua validate an unknown minimum", systems: large + "," + unknown, diskGB: 40, wantID: "unknown"},
 		{name: "report the smallest explicit minimum", systems: large + "," + fits, diskGB: 20, wantError: "Virtua.Cloud: для Debian 13 нужен диск от 40 ГиБ, на выбранном тарифе 20 ГиБ"},
+		{name: "accept Debian 13 minimal", systems: minimal, diskGB: 20, wantID: "debian-13-64"},
+		{name: "enforce the minimum for Debian 13 minimal", systems: minimal, diskGB: 19, wantError: "Virtua.Cloud: для Debian 13 нужен диск от 20 ГиБ, на выбранном тарифе 19 ГиБ"},
 		{name: "reject Windows and applications", systems: windows + "," + app, diskGB: 40, wantError: "Virtua.Cloud не вернул подходящий образ Debian 13"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

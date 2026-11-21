@@ -200,8 +200,8 @@ func (c *virtuaOrder) image(ctx context.Context, diskGB int) (string, error) {
 	var minRequired int64
 	for _, image := range list.Systems {
 		major, _, _ := strings.Cut(strings.TrimSpace(string(image.Version)), ".")
-		category := strings.TrimSpace(image.Category)
-		if (category != "" && !strings.EqualFold(category, "linux")) ||
+		category := strings.ToLower(strings.TrimSpace(image.Category))
+		if !oneOf(category, "", "linux", "minimal") ||
 			!strings.EqualFold(strings.TrimSpace(image.Distribution), "debian") || major != "13" ||
 			!oneOf(string(image.Windows), "", "null", `"0"`, `"false"`, "0", "false") || !virtuaIDPattern.MatchString(image.ID) {
 			continue
