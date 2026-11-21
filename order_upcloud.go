@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -478,12 +479,14 @@ func (c *upCloudOrder) verifyOrder(ctx context.Context, s upCloudOrderSnapshot, 
 	if err != nil || !slices.Equal(nics, []upCloudNICSpec{{Index: 1, Type: "public", Family: "IPv4"}, {Index: 2, Type: "utility", Family: "IPv4"}}) {
 		return "", errors.New("the ordered UpCloud VM does not have the requested IPv4 networking")
 	}
-	ip, err := c.address(ctx, nic.IPs.Items[0].Address)
+	nicIP := nic.IPs.Items[0]
+	ip, err := c.address(ctx, nicIP.Address)
 	if err != nil {
 		return "", err
 	}
+	// UpCloud can omit floating status from the address details while returning it on the NIC.
 	if ip.Server != id || ip.Zone != s.Zone || ip.Access != "public" || ip.Family != "IPv4" || ip.MAC != nic.MAC ||
-		ip.Floating != "no" || ip.delegated() {
+		cmp.Or(ip.Floating, nicIP.Floating) != "no" || ip.delegated() {
 		return "", errors.New("UpCloud has not confirmed the ordered VM's public IPv4")
 	}
 	if server.Metadata != "yes" || server.RemoteAccessEnabled == "yes" {
