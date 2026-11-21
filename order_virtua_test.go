@@ -80,9 +80,9 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 			script = ""
 			return ok(row{})
 		case "GET /v1/cloud-server":
-			servers := []row{}
+			servers := []row{{"uuid": testVirtuaScript, "name": "existing.vsys.cloud", "is_setup": 1, "is_processing": 0}}
 			if exists {
-				servers = append(servers, row{"uuid": testOrderVM, "name": "vs01.vsys.cloud", "label": hostname})
+				servers = append(servers, row{"uuid": testOrderVM, "name": "vs01.vsys.cloud", "label": hostname, "is_setup": 0, "is_processing": 1})
 			}
 			return ok(row{"cloud_servers": servers})
 		case "POST /v1/cloud/order":
@@ -94,7 +94,11 @@ func TestVirtuaOrderCatalogBootstrapAndLostResponse(t *testing.T) {
 			exists = true
 			return nil, errors.New("lost response")
 		case "GET /v1/cloud-server/" + testOrderVM:
-			return ok(row{"cloud_server": row{"uuid": testOrderVM, "status": "running", "is_setup": ready, "is_processing": !ready}})
+			setup, processing := 0, 1
+			if ready {
+				setup, processing = 1, 0
+			}
+			return ok(row{"cloud_server": row{"uuid": testOrderVM, "status": "running", "is_setup": setup, "is_processing": processing}})
 		case "GET /v1/network/cloud-server/" + testOrderVM + "/show":
 			return ok(row{"ip_addresses": []row{{"address": "10.0.0.1", "version": 4}, {"address": "8.8.4.4", "version": 4}}})
 		default:
