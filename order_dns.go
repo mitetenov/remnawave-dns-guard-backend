@@ -60,34 +60,8 @@ func (c *Cloudflare) checkNodeOrigin(j row, marker, oldIP, newIP string, mutate,
 	if err := c.checkOrderOriginZone(domain, zoneID); err != nil {
 		return 0, err
 	}
-	path := "/zones/" + url.PathEscape(zoneID) + "/dns_records"
 	read := func() (row, error) {
-		records, err := c.pages(path, url.Values{"name": {domain}})
-		if err != nil {
-			return nil, err
-		}
-		var owned row
-		for _, record := range records {
-			if !stringFields(record, "name", "type") {
-				return nil, integration("Cloudflare returned an invalid origin record response")
-			}
-			if !strings.EqualFold(strings.TrimSuffix(str(record["name"]), "."), domain) {
-				continue
-			}
-			switch record["type"] {
-			case "A":
-				comment := str(record["comment"])
-				ownedByOther := strings.HasPrefix(comment, "dns-guard-order:") || strings.HasPrefix(comment, "dns-guard-replacement:")
-				if owned != nil || (comment != marker && (!manual || ownedByOther)) || record["proxied"] != false ||
-					!stringFields(record, "id", "content") || str(record["id"]) == "" {
-					return nil, integration("The ordered node domain has a conflicting Cloudflare A record")
-				}
-				owned = record
-			case "AAAA", "CNAME", "NS":
-				return nil, integration("The ordered node domain has a conflicting Cloudflare record")
-			}
-		}
-		return owned, nil
+		return c.nodeOriginRecord(zoneID, domain, marker, manual)
 	}
 	record, err := read()
 	if err != nil {
@@ -118,6 +92,7 @@ func (c *Cloudflare) checkNodeOrigin(j row, marker, oldIP, newIP string, mutate,
 	}
 
 	var mutationErr error
+	path := "/zones/" + url.PathEscape(zoneID) + "/dns_records"
 	if record == nil {
 		if configuredTTL != math.Trunc(configuredTTL) || configuredTTL < 60 || configuredTTL > 86400 {
 			return 0, integration("The ordered node origin TTL is invalid")
@@ -140,4 +115,33 @@ func (c *Cloudflare) checkNodeOrigin(j row, marker, oldIP, newIP string, mutate,
 		return 0, integration("Cloudflare has not confirmed the ordered node origin address")
 	}
 	return max(ttl(record), ttl(confirmed)), nil
+}
+
+func (c *Cloudflare) nodeOriginRecord(zoneID, domain, marker string, manual bool) (row, error) {
+	records, err := c.pages("/zones/"+url.PathEscape(zoneID)+"/dns_records", url.Values{"name": {domain}})
+	if err != nil {
+		return nil, err
+	}
+	var owned row
+	for _, record := range records {
+		if !stringFields(record, "name", "type") {
+			return nil, integration("Cloudflare returned an invalid origin record response")
+		}
+		if !strings.EqualFold(strings.TrimSuffix(str(record["name"]), "."), domain) {
+			continue
+		}
+		switch record["type"] {
+		case "A":
+			comment := str(record["comment"])
+			ownedByOther := strings.HasPrefix(comment, "dns-guard-order:") || strings.HasPrefix(comment, "dns-guard-replacement:")
+			if owned != nil || (comment != marker && (!manual || ownedByOther)) || record["proxied"] != false ||
+				!stringFields(record, "id", "content") || str(record["id"]) == "" {
+				return nil, integration("The ordered node domain has a conflicting Cloudflare A record")
+			}
+			owned = record
+		case "AAAA", "CNAME", "NS":
+			return nil, integration("The ordered node domain has a conflicting Cloudflare record")
+		}
+	}
+	return owned, nil
 }
