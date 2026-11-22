@@ -207,7 +207,7 @@ become = true
 	}
 	var diagnostics *orderPlaybookDiagnostics
 	if order != nil {
-		diagnostics = &orderPlaybookDiagnostics{alias: alias}
+		diagnostics = &orderPlaybookDiagnostics{alias: alias, ip: ip}
 		env = append(env,
 			"ANSIBLE_STDOUT_CALLBACK=default", "ANSIBLE_DISPLAY_FAILED_STDERR=False", "ANSIBLE_FORCE_COLOR=False",
 			"ANSIBLE_CALLBACK_RESULT_FORMAT=json", "ANSIBLE_CALLBACK_FORMAT_PRETTY=False",
