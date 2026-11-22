@@ -65,25 +65,14 @@ var upCloudOrderCountryNames = map[string]string{
 }
 
 func (c *upCloudOrder) Countries(ctx context.Context) ([]orderCloudCountry, error) {
-	var reply struct {
-		Zones *struct {
-			Items []struct {
-				ID          string `json:"id"`
-				Description string `json:"description"`
-				Public      string `json:"public"`
-			} `json:"zone"`
-		} `json:"zones"`
-	}
-	if err := c.request(ctx, http.MethodGet, "/zone", nil, &reply); err != nil {
+	zones, err := c.zones(ctx)
+	if err != nil {
 		return nil, err
-	}
-	if reply.Zones == nil {
-		return nil, errors.New("UpCloud returned an invalid zone list")
 	}
 	var countries []orderCloudCountry
 	grouped := map[string][]string{}
 	descriptions := map[string]string{}
-	for _, entry := range reply.Zones.Items {
+	for _, entry := range zones {
 		if entry.Public != "yes" || !upCloudOrderZonePattern.MatchString(entry.ID) {
 			continue
 		}
