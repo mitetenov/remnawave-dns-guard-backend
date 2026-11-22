@@ -210,14 +210,44 @@ func (w *replacementWorker) retireVirtua(j row, c *virtuaOrder) error {
 	if err = panel.checkVirtuaCutover(j); err != nil {
 		return err
 	}
-	newIP, err := c.readyAddress(w.ctx, str(j["new_server_uuid"]))
+	newID := str(j["new_server_uuid"])
+	newIP, err := c.readyAddress(w.ctx, newID)
 	if err != nil {
 		return err
 	}
 	if newIP != j["new_ip"] {
 		return errors.New("новый сервер Virtua.Cloud сменил IPv4")
 	}
-	return c.deleteReplacementServer(w.ctx, str(j["server_uuid"]), str(j["old_ip"]))
+	return c.retireReplacementServer(w.ctx, str(j["server_uuid"]), str(j["old_ip"]), newID)
+}
+
+func (c *virtuaOrder) retireReplacementServer(ctx context.Context, oldID, oldIP, newID string) error {
+	err := c.deleteReplacementServer(ctx, oldID, oldIP)
+	var apiErr *virtuaAPIError
+	if !errors.As(err, &apiErr) || apiErr.status != http.StatusForbidden || apiErr.operation != "GET /v1/cloud-server/"+oldID {
+		return err
+	}
+
+	// The new VPS must also be visible in the account inventory used to confirm absence.
+	servers, listErr := c.listServers(ctx)
+	if listErr != nil {
+		return fmt.Errorf("%w. Не удалось проверить список серверов: %w", err, listErr)
+	}
+	newListed := false
+	for _, server := range servers {
+		id, ok := canonicalUUID(server.ID)
+		if !ok {
+			return fmt.Errorf("%w. Virtua.Cloud вернул некорректный UUID в списке серверов", err)
+		}
+		if id == oldID {
+			return fmt.Errorf("%w. Старый VPS по-прежнему в списке серверов Virtua.Cloud", err)
+		}
+		newListed = newListed || id == newID
+	}
+	if !newListed {
+		return fmt.Errorf("%w. Новый VPS отсутствует в списке серверов Virtua.Cloud", err)
+	}
+	return nil
 }
 
 func (c *virtuaOrder) checkReplacementServer(ctx context.Context, id, expectedIP string) error {

@@ -369,18 +369,26 @@ type virtuaServer struct {
 	Processing *virtuaServerFlag `json:"is_processing"`
 }
 
-func (c *virtuaOrder) findServer(ctx context.Context, name string) (string, error) {
+func (c *virtuaOrder) listServers(ctx context.Context) ([]virtuaServer, error) {
 	var list struct {
 		Servers []virtuaServer `json:"cloud_servers"`
 	}
 	if _, err := c.request(ctx, http.MethodGet, "/cloud-server", nil, &list); err != nil {
-		return "", err
+		return nil, err
 	}
 	if list.Servers == nil {
-		return "", integration("Virtua.Cloud не вернул список серверов")
+		return nil, integration("Virtua.Cloud не вернул список серверов")
+	}
+	return list.Servers, nil
+}
+
+func (c *virtuaOrder) findServer(ctx context.Context, name string) (string, error) {
+	servers, err := c.listServers(ctx)
+	if err != nil {
+		return "", err
 	}
 	var found string
-	for _, server := range list.Servers {
+	for _, server := range servers {
 		if server.Name != name && server.Label != name && server.Hostname != name {
 			continue
 		}
