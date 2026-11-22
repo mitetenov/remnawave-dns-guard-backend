@@ -273,9 +273,8 @@ func poolView(p row) row {
 	}
 	return value
 }
-func (a *App) targetViews(rows []row) []row {
-	view := a.s.probeSnapshot()
-	out := []row{}
+func (view probeSnapshot) targetViews(rows []row) []row {
+	out := make([]row, 0, len(rows))
 	for _, target := range rows {
 		value := view.summary(target).project(target)
 		for _, key := range []string{"next_due", "last_agent_id", "dns_operation_id", "dns_previous_enabled", "dns_profile_revision", "dns_next_retry", "dns_action", "dns_new_ip", "dns_replace_present"} {
@@ -285,7 +284,7 @@ func (a *App) targetViews(rows []row) []row {
 			value[key] = truth(value[key])
 		}
 		value["dns_pending_action"] = target["dns_action"]
-		checks := []row{}
+		checks := make([]row, 0, len(view.agents))
 		for _, agent := range view.agents {
 			check := view.checks[str(target["id"])][str(agent["id"])]
 			item := row{"agent_id": agent["id"], "fresh": checkFresh(check, agent, num(view.pools[str(target["pool_id"])]["interval_seconds"]), view.now), "failures": 0, "successes": 0, "last_checked_at": nil, "last_latency_ms": nil, "last_error": nil, "outcome": nil}
@@ -309,7 +308,11 @@ func (a *App) targetViews(rows []row) []row {
 	}
 	return out
 }
-func (a *App) targetView(t row) row { return a.targetViews([]row{t})[0] }
+func (a *App) targetView(t row) row {
+	pool := a.s.one("SELECT id,interval_seconds,failure_threshold,recovery_threshold FROM pools WHERE id=?", t["pool_id"])
+	view := a.s.probeView([]row{pool}, "SELECT * FROM target_checks WHERE target_id=?", t["id"])
+	return view.targetViews([]row{t})[0]
+}
 func (a *App) settingsView() row {
 	s := a.s
 	agents := s.checkerViews()
@@ -470,21 +473,21 @@ func (a *App) routes() {
 		return a.withStore(func() any {
 			result := a.settingsView()
 			delete(result, "remnawave_url")
-			views := a.targetViews(a.s.all("SELECT * FROM targets"))
-			healthy, excluded, stale := 0, 0, 0
-			for _, t := range views {
-				if t["status"] == "healthy" && !truth(t["dns_uncertain"]) {
+			a.addOverviewCounts(result)
+			return result
+		})
+	})
+	a.route("GET /api/header", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		return a.withStore(func() any {
+			agents := a.s.all("SELECT * FROM agents")
+			now, healthy := nowSeconds(), 0
+			for _, agent := range agents {
+				if checkerHealthy(agent, now) {
 					healthy++
 				}
-				if truth(t["manual_enabled"]) && !truth(t["dns_present"]) && !truth(t["dns_uncertain"]) {
-					excluded++
-				}
-				if t["status"] == "stale" {
-					stale++
-				}
 			}
-			result["pools"], result["targets"], result["healthy"], result["excluded"], result["stale"] = num(a.s.one("SELECT COUNT(*) n FROM pools")["n"]), len(views), healthy, excluded, stale
-			return result
+			pools := a.s.one("SELECT COUNT(*) n FROM pools")["n"]
+			return row{"pools": pools, "agents_total": len(agents), "agents_healthy": healthy, "agent_healthy": healthy > 0}
 		})
 	})
 	a.route("POST /api/integrations/cloudflare/test", "ui", func(w http.ResponseWriter, r *http.Request) any {
@@ -515,31 +518,5 @@ func (a *App) routes() {
 	a.poolRoutes()
 	a.subscriptionRoutes()
 	a.agentRoutes()
-	a.route("GET /api/events", "ui", func(w http.ResponseWriter, r *http.Request) any {
-		limit := 100
-		if values, ok := r.URL.Query()["limit"]; ok {
-			n, e := strconv.Atoi(values[0])
-			if e != nil {
-				invalid("request")
-			}
-			limit = max(1, min(n, 500))
-		}
-		return a.withStore(func() any {
-			conditions := []string{}
-			args := []any{}
-			for _, key := range []string{"level", "type", "pool_id"} {
-				if values, ok := r.URL.Query()[key]; ok {
-					conditions = append(conditions, key+"=?")
-					args = append(args, values[0])
-				}
-			}
-			query := "SELECT * FROM events"
-			if len(conditions) > 0 {
-				query += " WHERE " + strings.Join(conditions, " AND ")
-			}
-			query += " ORDER BY created_at DESC LIMIT ?"
-			args = append(args, limit)
-			return a.s.all(query, args...)
-		})
-	})
+	a.route("GET /api/events", "ui", a.eventsRoute)
 }

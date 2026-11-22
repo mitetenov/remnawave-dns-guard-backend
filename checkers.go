@@ -46,17 +46,27 @@ func checkerHealthy(agent row, now float64) bool {
 }
 
 func checkFresh(check, agent row, interval, now float64) bool {
-	if check == nil || check["outcome"] == nil || !checkerHealthy(agent, now) {
-		return false
-	}
-	checked, err := time.Parse(time.RFC3339Nano, str(check["last_checked_at"]))
-	return err == nil && now-float64(checked.UnixNano())/1e9 < max(float64(leaseSeconds), interval*3) && routeEvidenceFresh(check, agent, now)
+	return checkerHealthy(agent, now) && freshCheckUntil(check, agent, interval, now) != 0
 }
 
 type probeSummary struct {
 	Failures, Successes, Active, Checked int
 	Fresh, Remove, Restore               bool
 	Latest, Evidence                     row
+	nextExpiry                           float64
+}
+
+// The caller has already established that the checker is healthy.
+func freshCheckUntil(check, agent row, interval, now float64) float64 {
+	if check == nil || check["outcome"] == nil {
+		return 0
+	}
+	checked, err := time.Parse(time.RFC3339Nano, str(check["last_checked_at"]))
+	expires := float64(checked.UnixNano())/1e9 + max(float64(leaseSeconds), interval*3)
+	if err != nil || now >= expires || !routeEvidenceFresh(check, agent, now) {
+		return 0
+	}
+	return expires
 }
 
 // One fresh failing checker is enough to remove an IP. Recovery requires a
@@ -74,7 +84,8 @@ func summarizeProbes(pool row, agents []row, checks map[string]row, now float64)
 		}
 		summary.Active++
 		successes := 0
-		if checkFresh(check, agent, num(pool["interval_seconds"]), now) {
+		if expires := freshCheckUntil(check, agent, num(pool["interval_seconds"]), now); expires != 0 {
+			summary.nextExpiry = nextProbeDeadline(summary.nextExpiry, expires)
 			summary.Checked++
 			successes = int(num(check["successes"]))
 			if failures := int(num(check["failures"])); failures > summary.Failures {
@@ -97,28 +108,23 @@ func (p probeSummary) project(target row) row {
 		value[key] = v
 	}
 	value["failures"], value["successes"] = p.Failures, p.Successes
-	if p.Latest != nil {
-		value["last_checked_at"], value["last_latency_ms"], value["last_error"], value["last_agent_id"] = p.Latest["last_checked_at"], p.Latest["last_latency_ms"], p.Latest["last_error"], p.Latest["agent_id"]
-	}
-	if p.Evidence != nil {
-		value["last_error"] = p.Evidence["last_error"]
-	}
-	status := observedStatus(value, truth(target["dns_present"]), truth(target["dns_uncertain"]))
-	if !p.Fresh && p.Latest != nil {
-		// Preserve the last observation separately from today's missing coverage.
-		history := row{"manual_enabled": target["manual_enabled"], "last_checked_at": p.Latest["last_checked_at"], "failures": p.Latest["failures"], "successes": p.Latest["successes"]}
-		status = observedStatus(history, truth(target["dns_present"]), truth(target["dns_uncertain"]))
-	}
-	if p.Failures > 0 && target["status"] == "protected" {
-		status = "protected"
-	}
-	value["last_status"], value["probe_fresh"] = status, p.Fresh
+	value["last_checked_at"], value["last_latency_ms"], value["last_error"], value["last_agent_id"] = p.lastObservation(target)
+	status, lastStatus := p.statuses(target)
+	value["last_status"], value["probe_fresh"] = lastStatus, p.Fresh
 	value["checkers_active"], value["checkers_checked"] = p.Active, p.Checked
-	if truth(target["manual_enabled"]) && value["last_checked_at"] != nil && !p.Fresh {
-		status = "stale"
-	}
 	value["status"] = status
 	return value
+}
+
+func (p probeSummary) lastObservation(target row) (checkedAt, latency, lastError, agentID any) {
+	checkedAt, latency, lastError, agentID = target["last_checked_at"], target["last_latency_ms"], target["last_error"], target["last_agent_id"]
+	if p.Latest != nil {
+		checkedAt, latency, lastError, agentID = p.Latest["last_checked_at"], p.Latest["last_latency_ms"], p.Latest["last_error"], p.Latest["agent_id"]
+	}
+	if p.Evidence != nil {
+		lastError = p.Evidence["last_error"]
+	}
+	return checkedAt, latency, lastError, agentID
 }
 
 type probeSnapshot struct {
@@ -128,41 +134,18 @@ type probeSnapshot struct {
 	now    float64
 }
 
-func (s *Store) probeSnapshot() probeSnapshot {
-	view := probeSnapshot{agents: s.all("SELECT * FROM agents ORDER BY id"), pools: map[string]row{}, checks: map[string]map[string]row{}, now: nowSeconds()}
-	for _, pool := range s.all("SELECT * FROM pools") {
-		view.pools[str(pool["id"])] = pool
-	}
-	for _, check := range s.all("SELECT * FROM target_checks") {
-		id := str(check["target_id"])
-		if view.checks[id] == nil {
-			view.checks[id] = map[string]row{}
-		}
-		view.checks[id][str(check["agent_id"])] = check
-	}
-	return view
-}
-
 func (v probeSnapshot) summary(target row) probeSummary {
 	return summarizeProbes(v.pools[str(target["pool_id"])], v.agents, v.checks[str(target["id"])], v.now)
 }
 
-// Cache the same projection used by the API for durable notifications. Clock
-// expiry is refreshed by the notifier even if no agents are polling.
-func (s *Store) refreshProbeTargets() {
-	view := s.probeSnapshot()
-	for _, target := range s.all("SELECT * FROM targets") {
-		s.cacheProbeTarget(target, view.pools[str(target["pool_id"])], view.summary(target))
+func (p probeSummary) cachedUpdate(target row) (string, []any) {
+	status, _ := p.statuses(target)
+	checkedAt, latency, lastError, agentID := p.lastObservation(target)
+	if target["status"] == status && num(target["failures"]) == float64(p.Failures) && num(target["successes"]) == float64(p.Successes) &&
+		target["last_checked_at"] == checkedAt && target["last_latency_ms"] == latency && target["last_error"] == lastError && target["last_agent_id"] == agentID {
+		return status, nil
 	}
-}
-
-func (s *Store) cacheProbeTarget(target, pool row, summary probeSummary) row {
-	value := summary.project(target)
-	if target["status"] != value["status"] || num(target["failures"]) != num(value["failures"]) || num(target["successes"]) != num(value["successes"]) || target["last_checked_at"] != value["last_checked_at"] || target["last_error"] != value["last_error"] || target["last_latency_ms"] != value["last_latency_ms"] || target["last_agent_id"] != value["last_agent_id"] {
-		s.exec("UPDATE targets SET status=?,failures=?,successes=?,last_checked_at=?,last_latency_ms=?,last_error=?,last_agent_id=? WHERE id=?", value["status"], value["failures"], value["successes"], value["last_checked_at"], value["last_latency_ms"], value["last_error"], value["last_agent_id"], target["id"])
-	}
-	s.observeReplacement(value, pool, summary, nowSeconds())
-	return value
+	return status, []any{target["id"], status, p.Failures, p.Successes, checkedAt, latency, lastError, agentID}
 }
 
 func (s *Store) checkerViews() []row {
@@ -193,8 +176,7 @@ func (a *App) pollChecker(data Poll) []row {
 	jobs := []row{}
 	previous := s.one("SELECT * FROM agents WHERE id=?", data.AgentID)
 	if previous != nil && !checkerHealthy(previous, now) {
-		s.exec("UPDATE target_checks SET failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,outcome=NULL,route_results=NULL WHERE agent_id=?", data.AgentID)
-		s.exec("UPDATE jobs SET consumed=1 WHERE agent_id=? AND consumed=0", data.AgentID)
+		s.resetChecker(data.AgentID)
 	}
 	s.exec("INSERT INTO agents (id,last_seen,healthy,version) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_seen=excluded.last_seen,healthy=excluded.healthy,version=excluded.version", data.AgentID, now, data.ControlOK, data.Version)
 	if previous == nil || truth(previous["healthy"]) != data.ControlOK {
@@ -210,15 +192,17 @@ func (a *App) pollChecker(data Poll) []row {
 		s.event("warning", "check", "Agent "+str(job["agent_id"])+": probe lease expired; no failure counted", job["pool_id"], job["target_id"])
 	}
 	s.exec("DELETE FROM jobs WHERE consumed=1 AND expires<?", now-86400)
-	defer s.refreshProbeTargets()
+	defer func() { s.refreshProbeTargets(nowSeconds()) }()
 	current := s.one("SELECT * FROM agents WHERE id=?", data.AgentID)
 	if !checkerHealthy(current, now) {
 		return jobs
 	}
-	// Newly registered checkers and newly enrolled targets need no setup in Guard.
-	s.exec("INSERT OR IGNORE INTO target_checks (target_id,agent_id) SELECT targets.id,? FROM targets JOIN pools ON pools.id=targets.pool_id WHERE manual_enabled=1 AND profile IS NOT NULL", data.AgentID)
 	capacity := 4 - int(num(s.one("SELECT COUNT(*) n FROM jobs WHERE agent_id=? AND consumed=0", data.AgentID)["n"]))
-	for _, target := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id JOIN target_checks c ON c.target_id=targets.id AND c.agent_id=? WHERE manual_enabled=1 AND profile IS NOT NULL AND c.next_due<=? AND (dns_action IS NULL OR dns_action!='replace_ip') AND NOT EXISTS (SELECT 1 FROM replacement_jobs r WHERE r.target_id=targets.id AND r.stage IN ('retire','provision','enrollment','ansible','remnawave')) AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND agent_id=? AND consumed=0) ORDER BY c.next_due,targets.id", data.AgentID, now, data.AgentID) {
+	if capacity <= 0 {
+		return jobs
+	}
+	s.ensureCheckerSchedule(data.AgentID)
+	for _, target := range s.all("SELECT targets.* FROM targets JOIN pools ON pools.id=targets.pool_id JOIN target_checks c ON c.target_id=targets.id AND c.agent_id=? WHERE profile IS NOT NULL AND c.next_due<=? AND "+probeEligibleTarget+" AND NOT EXISTS (SELECT 1 FROM jobs WHERE target_id=targets.id AND agent_id=? AND consumed=0) ORDER BY c.next_due,targets.id", data.AgentID, now, data.AgentID) {
 		if len(jobs) >= capacity {
 			break
 		}
@@ -268,12 +252,12 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 	} else {
 		s.exec("UPDATE target_checks SET route_results=NULL WHERE target_id=? AND agent_id=?", target["id"], agentID)
 	}
-	checks := map[string]row{}
-	for _, check := range s.all("SELECT * FROM target_checks WHERE target_id=?", target["id"]) {
-		checks[str(check["agent_id"])] = check
-	}
-	summary := summarizeProbes(pool, s.all("SELECT * FROM agents ORDER BY id"), checks, nowSeconds())
-	target = s.cacheProbeTarget(target, pool, summary)
+	summary := summarizeProbes(pool, s.all("SELECT * FROM agents ORDER BY id"), s.targetChecks(target["id"]), now)
+	binding := s.one(replacementObservedBindings+" WHERE b.target_id=? AND "+replacementObservedFilter, target["id"])
+	deadline := s.observeReplacement(target, pool, binding, summary, now)
+	status, update := summary.cachedUpdate(target)
+	s.updateCachedProbeTargets(update)
+	s.scheduleProbeRefresh(target["id"], nextProbeDeadline(summary.nextExpiry, deadline))
 	replacement := s.activeReplacement(target["id"])
 	replacementOwnsDNS := replacement != nil && !oneOf(str(replacement["stage"]), "preflight", "cleanup")
 	manualPending := target["dns_action"] != nil && !strings.HasPrefix(str(target["dns_action"]), "auto_")
@@ -282,7 +266,7 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 			s.exec("UPDATE pools SET remnawave_next_check=0 WHERE id=?", pool["id"])
 			a.reconciler.signal()
 		}
-		if summary.Remove && (truth(target["dns_present"]) || truth(target["dns_uncertain"])) && target["status"] != "protected" {
+		if summary.Remove && (truth(target["dns_present"]) || truth(target["dns_uncertain"])) && status != "protected" {
 			a.reconciler.queueLocked(str(target["id"]), "auto_remove")
 		} else if summary.Restore && (!truth(target["dns_present"]) || truth(target["dns_uncertain"])) {
 			a.reconciler.queueLocked(str(target["id"]), "auto_restore")

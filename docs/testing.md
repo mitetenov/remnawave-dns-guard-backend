@@ -21,6 +21,14 @@ ANSIBLE_REPO_TOKEN="$(gh auth token)" docker buildx build --load --platform linu
 
 CI использует Ubuntu 26.04, проверяет tidy/verify/gofmt/vet/golangci-lint v2.15.0, unit/race и production build. Compose проверяется с инертными CI-параметрами. При сборке образа AMD64 проверяется синтаксис двух встроенных плейбуков. Для сборки нужен доступ на чтение `mitetenov/ansible`. После этих проверок main публикует latest и sha-<полный commit SHA>. Тесты замены узла запускают имитацию Ansible и SSH. Тесты изолированы от UpCloud, Cloudflare, Remnawave, DNS и действующих узлов. [Сборка и CI](../README.md#сборка-и-ci)
 
+## Замер DNS-сверки
+
+Замер одного прохода с 50 активациями, ожидающими результатов, на 1000 узлах и трёх агентах. Тест использует SQLite в памяти и не обращается к Cloudflare.
+
+```sh
+go test -run '^$' -bench '^BenchmarkReconcilerPendingEnrollments$' -benchmem
+```
+
 ## Частые причины отказа
 
 | Симптом | Что проверить |

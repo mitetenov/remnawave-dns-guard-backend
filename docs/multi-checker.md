@@ -27,7 +27,9 @@ AGENT_ID=ru-provider-city-2
 
 В настройках показаны ID, версия, последняя связь и отдельный статус каждой ноды: `online`, `control_unhealthy`, `offline`. В шапке — количество готовых и общее количество зарегистрированных чекеров. У каждого IP раскрывается список результатов и серий всех чекеров. Сводный счётчик ошибок — максимум среди свежих активных чекеров, успехов — минимум среди всех активных чекеров (0 при отсутствии свежей проверки).
 
-`GET /api/agents` возвращает список `{id,version,last_seen,healthy,status}`. Те же данные доступны в `agents` у `/api/settings` и `/api/overview`, вместе с `agents_total` и `agents_healthy`. Старое `agent_healthy` означает наличие хотя бы одного готового чекера, `agent_last_seen` — самую недавнюю связь.
+`GET /api/agents` возвращает список `{id,version,last_seen,healthy,status}`. Те же данные доступны в `agents` у `/api/settings` и `/api/overview`, вместе с `agents_total` и `agents_healthy`. Для шапки `GET /api/header` возвращает только количество пулов и счётчики агентов. `agent_healthy` указывает на наличие хотя бы одного готового чекера, `agent_last_seen` — на самую недавнюю связь.
+
+`POST /api/pools/{id}/check` возвращает время запроса `started_at`, ID целей `target_ids` и ID готовых агентов с поддержкой профиля `expected_agents`. Результаты с `last_checked_at` позже `started_at` получены после запроса.
 
 Target дополнительно возвращает `checkers_active`, `checkers_checked` и `checks:[{agent_id,fresh,failures,successes,last_checked_at,last_latency_ms,last_error,outcome}]`. `outcome` — `true`, `false` либо `null` для отсутствующего/неопределённого результата. `probe_fresh` обозначает достаточное актуальное свидетельство: свежий отказ любого чекера либо свежие результаты всех активных чекеров.
 

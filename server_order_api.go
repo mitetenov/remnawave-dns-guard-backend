@@ -43,7 +43,7 @@ func (a *App) orderRoutes() {
 				delete(j, "create_attempted")
 			}
 			pools := a.s.all(`SELECT p.id,p.name,p.hostname,COALESCE(t.domain_template,'') AS domain_template FROM pools p LEFT JOIN server_order_templates t ON p.id=t.pool_id ORDER BY p.name,p.hostname`)
-			return row{"orders": jobs, "pools": pools, "stages": orderStages, "virtua_configured": a.s.get("virtua_token") != ""}
+			return row{"orders": jobs, "pools": pools, "stages": orderStages, "upcloud_configured": a.s.get("upcloud_token") != "", "virtua_configured": a.s.get("virtua_token") != ""}
 		})
 	})
 	a.route("DELETE /api/server-orders/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {

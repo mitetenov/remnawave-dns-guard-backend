@@ -122,8 +122,9 @@ func (a *App) poolRoutes() {
 	a.route("GET /api/pools/{id}/targets", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
 			id := r.PathValue("id")
-			a.pool(id)
-			return a.targetViews(a.s.all("SELECT * FROM targets WHERE pool_id=? ORDER BY name", id))
+			pool := a.pool(id)
+			view := a.s.poolProbeView(pool, "*")
+			return view.targetViews(a.s.all("SELECT * FROM targets WHERE pool_id=? ORDER BY name", id))
 		})
 	})
 	a.route("POST /api/pools/{id}/targets", "ui", func(w http.ResponseWriter, r *http.Request) any {
@@ -189,11 +190,26 @@ func (a *App) poolRoutes() {
 			if p["profile"] == nil {
 				fail(409, "Сначала сохраните VLESS-профиль для проверки узлов")
 			}
-			if a.s.one("SELECT id FROM targets WHERE pool_id=? AND manual_enabled=1", id) == nil {
+			if a.s.one("SELECT id FROM targets WHERE pool_id=? AND manual_enabled=1 LIMIT 1", id) == nil {
 				fail(409, "Добавьте или включите хотя бы один узел для проверки")
 			}
+			startedAt := time.Now()
 			a.s.exec("UPDATE target_checks SET next_due=0 WHERE target_id IN (SELECT id FROM targets WHERE pool_id=? AND manual_enabled=1)", id)
-			return row{"ok": true}
+			targets := []string{}
+			for _, target := range a.s.all("SELECT id FROM targets WHERE pool_id=? AND "+probeEligibleTarget+" ORDER BY id", id) {
+				targets = append(targets, str(target["id"]))
+			}
+			agents := []string{}
+			if len(targets) > 0 {
+				now := float64(startedAt.UnixNano()) / 1e9
+				profile := a.s.profile(p)
+				for _, agent := range a.s.all("SELECT * FROM agents ORDER BY id") {
+					if checkerHealthy(agent, now) && supportsProbeProfile(str(agent["version"]), profile) {
+						agents = append(agents, str(agent["id"]))
+					}
+				}
+			}
+			return row{"ok": true, "started_at": iso(startedAt), "expected_agents": agents, "target_ids": targets}
 		})
 	})
 }

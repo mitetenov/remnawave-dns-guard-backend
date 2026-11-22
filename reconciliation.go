@@ -154,7 +154,7 @@ func (r *Reconciler) executeLocked(targetID string, raise bool) error {
 		p := s.one("SELECT * FROM pools WHERE id=?", t["pool_id"])
 		action := str(t["dns_action"])
 		if oneOf(action, "enroll", "enable") || strings.HasPrefix(action, "auto_") {
-			if !s.probeSnapshot().summary(t).permitsDNS(t, p) {
+			if !s.targetProbeSummary(targetID, p).permitsDNS(t, p) {
 				if strings.HasPrefix(action, "auto_") {
 					s.exec("UPDATE targets SET dns_action=NULL,dns_uncertain=CASE WHEN dns_error IS NULL THEN 0 ELSE dns_uncertain END WHERE id=?", targetID)
 				}

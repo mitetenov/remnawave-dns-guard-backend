@@ -173,7 +173,7 @@ func (s *Store) profile(p row) Profile {
 func (s *Store) event(level, kind, message string, poolID, targetID any) {
 	s.exec("INSERT INTO events VALUES (?,?,?,?,?,?,?)", uid(), iso(time.Now()), level, kind, message, poolID, targetID)
 	s.exec("DELETE FROM events WHERE created_at < ?", iso(time.Now().Add(-30*24*time.Hour)))
-	s.exec("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY created_at DESC LIMIT -1 OFFSET 100000)")
+	s.exec("DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY created_at DESC,id DESC LIMIT -1 OFFSET 100000)")
 }
 func (s *Store) initialize(c Config) (err error) {
 	defer func() {
@@ -214,13 +214,14 @@ func (s *Store) initialize(c Config) (err error) {
 			s.exec("INSERT INTO settings VALUES ('auth_revision',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", revision)
 		})
 	}
-	s.exec("CREATE INDEX IF NOT EXISTS events_by_time ON events(created_at)")
+	s.initializeEventIndexes()
 	for key, value := range map[string]string{"cloudflare_api_token": c.CloudflareAPIToken, "remnawave_url": c.RemnawaveURL, "remnawave_api_token": c.RemnawaveAPIToken} {
 		if value != "" && s.one("SELECT key FROM settings WHERE key=?", key) == nil {
 			s.set(key, value)
 		}
 	}
 	s.initializeNotifications()
+	s.initializeProbeRefresh()
 	return nil
 }
 func safeDBError(p any) error { return fmt.Errorf("cannot open or migrate SQLite database") }

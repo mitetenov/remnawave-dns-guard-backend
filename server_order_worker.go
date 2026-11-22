@@ -305,7 +305,10 @@ func (m *orderManager) finish(j row) error {
 	var ready bool
 	a.withStore(func() any {
 		t := s.one("SELECT * FROM targets WHERE id=?", j["target_id"])
-		ready = t != nil && t["ip"] == j["ip"] && t["dns_action"] == nil && !truth(t["dns_uncertain"]) && truth(t["manual_enabled"]) && truth(t["dns_present"]) && s.probeSnapshot().summary(t).Restore
+		if t != nil && t["ip"] == j["ip"] && t["dns_action"] == nil && !truth(t["dns_uncertain"]) && truth(t["manual_enabled"]) && truth(t["dns_present"]) {
+			pool := s.one("SELECT id,interval_seconds,failure_threshold,recovery_threshold FROM pools WHERE id=?", t["pool_id"])
+			ready = s.targetProbeSummary(t["id"], pool).Restore
+		}
 		return nil
 	})
 	if !ready {

@@ -61,7 +61,7 @@ func proxyReady(agent row, now float64) bool {
 
 func (s *Store) resetChecker(id string) {
 	s.exec("UPDATE jobs SET consumed=1 WHERE agent_id=? AND consumed=0", id)
-	s.exec("UPDATE target_checks SET failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,outcome=NULL,route_results=NULL WHERE agent_id=?", id)
+	s.exec("UPDATE target_checks SET failures=0,successes=0,next_due=0,last_checked_at=NULL,last_latency_ms=NULL,last_error=NULL,outcome=NULL,route_results=NULL WHERE agent_id=? AND ("+checkerHasProbeState+")", id)
 }
 
 func (s *Store) proxyURL(agent row) string {
@@ -159,7 +159,7 @@ func (a *App) checkerProxyRoutes() {
 			a.s.transaction(func() {
 				a.s.exec("UPDATE agents SET proxy_url=?,socks5_enabled=CASE WHEN ? IS NULL THEN 0 ELSE socks5_enabled END,proxy_revision=proxy_revision+1,proxy_healthy=0,proxy_checked_at=NULL,proxy_latency_ms=NULL,proxy_exit_ip=NULL,proxy_test_id=NULL,proxy_test_requested=NULL,proxy_test_result=NULL,proxy_test_url=NULL,proxy_test_draft=0,proxy_test_latency_ms=NULL,proxy_test_exit_ip=NULL,proxy_test_checked_at=NULL WHERE id=?", encrypted, encrypted, agent["id"])
 				a.s.resetChecker(str(agent["id"]))
-				a.s.refreshProbeTargets()
+				a.s.refreshProbeTargets(nowSeconds())
 				a.s.event("info", "system", "Checker "+str(agent["id"])+": proxy settings updated", nil, nil)
 			})
 			return a.s.checkerProxyDetail(a.checker(str(agent["id"])), nowSeconds())
@@ -230,7 +230,7 @@ func (a *App) checkerProxyRoutes() {
 				if report.ControlOK != nil {
 					a.s.exec("UPDATE agents SET healthy=? WHERE id=?", *report.ControlOK, report.AgentID)
 				}
-				a.s.refreshProbeTargets()
+				a.s.refreshProbeTargets(nowSeconds())
 			})
 			return row{"accepted": true}
 		})

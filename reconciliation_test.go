@@ -2,6 +2,34 @@ package guard
 
 import "testing"
 
+func TestPendingEnrollmentUsesOnlyItsOwnChecks(t *testing.T) {
+	a, err := New(testConfig(":memory:"), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	s := a.s
+	calls := 0
+	a.reconciler.provider = func() (*Cloudflare, error) {
+		calls++
+		return nil, integration("test provider unavailable")
+	}
+	now := nowSeconds()
+	checkedAt := iso(fromSeconds(now))
+	s.exec("INSERT INTO pools (id,interval_seconds,failure_threshold,recovery_threshold) VALUES ('p',60,3,5)")
+	s.exec("INSERT INTO targets (id,pool_id,ip,dns_action,dns_present) VALUES ('pending','p','198.18.0.1','enroll',0),('other','p','198.18.0.2',NULL,1)")
+	s.exec("INSERT INTO agents (id,last_seen,healthy) VALUES ('a',?,1),('b',?,1)", now, now)
+	s.exec("INSERT INTO target_checks (target_id,agent_id,successes,last_checked_at,outcome) VALUES ('pending','a',5,?,1),('other','b',5,?,1)", checkedAt, checkedAt)
+
+	if err := a.reconciler.execute("pending", false); err != nil || calls != 0 {
+		t.Fatalf("another target's result authorized a DNS call: calls=%d, err=%v", calls, err)
+	}
+	s.exec("INSERT INTO target_checks (target_id,agent_id,successes,last_checked_at,outcome) VALUES ('pending','b',5,?,1)", checkedAt)
+	if err := a.reconciler.execute("pending", false); err != nil || calls != 1 {
+		t.Fatalf("own fresh checks did not authorize the DNS call: calls=%d, err=%v", calls, err)
+	}
+}
+
 func TestActivationRequiresFreshRecoveryFromEveryChecker(t *testing.T) {
 	now := float64(10000)
 	pool := row{"interval_seconds": 60, "failure_threshold": 3, "recovery_threshold": 5, "revision": 2}
