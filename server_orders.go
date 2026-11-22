@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -17,6 +18,7 @@ import (
 const (
 	upCloudOrderProvider = "upcloud"
 	virtuaOrderProvider  = "virtua"
+	orderVerifyTimeout   = 10 * time.Minute
 )
 
 func orderProviderName(provider string) string {
@@ -76,12 +78,12 @@ var orderStages = map[string]string{
 	"panel": "Регистрация ноды в Remnawave", "ansible": "Установка и настройка ноды",
 	"target": "Добавление в DNS Guard", "verify": "Проверка доступности и публикация DNS",
 	"complete": "Готово", "cancelled": "Отменён", "rejected": "Провайдер отклонил заказ",
-	"deleting": "Удаление", "deleted": "Удалён",
+	"deleting": "Удаление", "deleted": "Удалён", "unreachable": "Сервер недоступен",
 }
 
 var errOrderQuoteChanged = errors.New("тариф, его цена или характеристики изменились. Выберите актуальный тариф и подтвердите новый заказ")
 
-const orderActive = "stage NOT IN ('complete','cancelled','rejected','deleted')"
+const orderActive = "stage NOT IN ('complete','cancelled','rejected','deleted','unreachable')"
 
 func (s *Store) initializeOrders() {
 	s.exec(`CREATE TABLE IF NOT EXISTS server_order_templates(
@@ -100,7 +102,7 @@ func (s *Store) initializeOrders() {
 	if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == "provider" }) {
 		s.exec("ALTER TABLE server_orders ADD COLUMN provider TEXT NOT NULL DEFAULT 'upcloud'")
 	}
-	for _, name := range []string{"delete_pending", "deleted_resources"} {
+	for _, name := range []string{"delete_pending", "deleted_resources", "delete_unreachable"} {
 		if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == name }) {
 			s.exec("ALTER TABLE server_orders ADD COLUMN " + name + " INTEGER NOT NULL DEFAULT 0")
 		}
@@ -108,8 +110,24 @@ func (s *Store) initializeOrders() {
 	if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == "auto_host_uuid" }) {
 		s.exec("ALTER TABLE server_orders ADD COLUMN auto_host_uuid TEXT")
 	}
+	if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == "retry_operation_id" }) {
+		s.exec("ALTER TABLE server_orders ADD COLUMN retry_operation_id TEXT")
+	}
+	if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == "verify_deadline" }) {
+		s.transaction(func() {
+			s.exec("ALTER TABLE server_orders ADD COLUMN verify_deadline REAL")
+			s.exec(`UPDATE server_orders SET verify_deadline=? WHERE stage='verify'
+ AND EXISTS (SELECT 1 FROM targets t WHERE t.id=server_orders.target_id AND t.ip=server_orders.ip AND t.dns_action='enroll' AND t.dns_present=0)
+ AND NOT EXISTS (SELECT 1 FROM target_checks c WHERE c.target_id=server_orders.target_id AND c.successes>0)`, nowSeconds()+orderVerifyTimeout.Seconds())
+		})
+	}
 	s.exec("CREATE INDEX IF NOT EXISTS server_orders_target ON server_orders(target_id)")
+	s.exec("CREATE UNIQUE INDEX IF NOT EXISTS server_orders_retry_operation ON server_orders(retry_operation_id) WHERE retry_operation_id IS NOT NULL")
 	s.initializeOrderLogs()
+}
+
+func orderOperationID(j row) string {
+	return cmp.Or(str(j["retry_operation_id"]), str(j["id"]))
 }
 
 func newOrderManager(a *App) *orderManager {

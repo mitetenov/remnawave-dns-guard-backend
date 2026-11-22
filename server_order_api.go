@@ -31,7 +31,7 @@ func serverOrderError(err error) {
 func (a *App) orderRoutes() {
 	a.route("GET /api/server-orders", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
-			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,create_attempted,can_retry_create,deleted_resources
+			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,create_attempted,can_retry_create,deleted_resources,retry_operation_id
  FROM server_orders WHERE ` + orderActive + ` OR stage='complete' OR id IN (SELECT id FROM server_orders ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC`)
 			for _, j := range jobs {
 				j["can_cancel"] = orderStageCancellable(j)
@@ -174,11 +174,13 @@ func (a *App) orderRoutes() {
 			invalid("host_key")
 		}
 		return a.withStore(func() any {
-			j := a.s.one("SELECT id,stage,create_attempted,enroll_digest,host_key FROM server_orders WHERE id=?", r.PathValue("id"))
+			id := r.PathValue("id")
+			j := a.s.one(`SELECT id,stage,create_attempted,enroll_digest,host_key FROM server_orders
+ WHERE (id=? AND retry_operation_id IS NULL) OR retry_operation_id=?`, id, id)
 			table := "server_orders"
 			if j == nil {
 				table = "replacement_jobs"
-				j = a.s.one("SELECT id,stage,create_attempted,enroll_digest,host_key FROM replacement_jobs WHERE id=? AND provider='virtua'", r.PathValue("id"))
+				j = a.s.one("SELECT id,stage,create_attempted,enroll_digest,host_key FROM replacement_jobs WHERE id=? AND provider='virtua'", id)
 			}
 			if !truth(j["create_attempted"]) || !constantEqual(str(j["enroll_digest"]), digest(token)) {
 				fail(401, "Invalid enrollment credential")

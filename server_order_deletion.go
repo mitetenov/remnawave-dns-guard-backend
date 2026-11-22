@@ -130,6 +130,9 @@ func (m *orderManager) deleteOrderDNS(j row) error {
 	err = dns.removeOrderDNS(j, pool)
 	var integrationErr *IntegrationError
 	if errors.As(err, &integrationErr) && integrationErr.Kind == "last_record" {
+		if truth(j["delete_unreachable"]) {
+			return errors.New("последняя A-запись пула защищена. Добавьте другой IP для продолжения удаления недоступного сервера")
+		}
 		a.withStore(func() any {
 			s.exec("UPDATE server_orders SET stage='complete',delete_pending=0,error=?,updated_at=? WHERE id=?",
 				"Последняя A-запись пула защищена. Добавьте другой IP или снимите галочку удаления из DNS и DNS Guard.", iso(time.Now()), j["id"])
@@ -147,6 +150,10 @@ func (m *orderManager) finishOrderDeletionStep(j row, done int) {
 	s := m.a.s
 	pending := int(num(j["delete_pending"])) &^ done
 	deleted := int(num(j["deleted_resources"])) | done
+	if pending == 0 && truth(j["delete_unreachable"]) {
+		m.finishUnreachableOrder(j)
+		return
+	}
 	stage := "deleting"
 	if deleted == orderDeleteAll {
 		stage = "deleted"
@@ -159,10 +166,32 @@ func (m *orderManager) finishOrderDeletionStep(j row, done int) {
 		case orderDeleteDNS:
 			s.exec("DELETE FROM targets WHERE id=?", j["target_id"])
 			s.exec("UPDATE pools SET dns_next_check=0,remnawave_next_check=0 WHERE id=?", j["pool_id"])
-			s.event("warning", "manual", "Сервер удалён из DNS и DNS Guard", j["pool_id"], j["target_id"])
+			source := "manual"
+			if truth(j["delete_unreachable"]) {
+				source = "system"
+			}
+			s.event("warning", source, "Сервер удалён из DNS и DNS Guard", j["pool_id"], j["target_id"])
 		case orderDeleteHosting, orderDeleteRemnawave:
 			s.exec("UPDATE replacement_bindings SET enabled=0,blocked_since=NULL WHERE target_id=?", j["target_id"])
 		}
+	})
+}
+
+func (m *orderManager) finishUnreachableOrder(j row) {
+	s := m.a.s
+	m.a.withStore(func() any {
+		if j["retry_operation_id"] == nil {
+			// The previous VPS is confirmed gone. The new order keeps the
+			// selected settings, with fresh cloud and SSH identities.
+			s.exec(`UPDATE server_orders SET stage='preflight',retry_operation_id=?,delete_pending=0,delete_unreachable=0,deleted_resources=0,
+ snapshot=NULL,enroll_digest=NULL,host_key=NULL,create_attempted=0,can_retry_create=0,server_uuid=NULL,ip=NULL,node_uuid=NULL,target_id=NULL,
+ auto_host_uuid=NULL,next_retry=0,error=NULL,updated_at=? WHERE id=? AND stage='deleting' AND delete_unreachable=1`, uid(), iso(time.Now()), j["id"])
+			return nil
+		}
+		s.exec(`UPDATE server_orders SET stage='unreachable',delete_pending=0,delete_unreachable=0,deleted_resources=?,host_key=NULL,
+ next_retry=0,error=?,updated_at=? WHERE id=? AND stage='deleting' AND delete_unreachable=1`, orderDeleteAll,
+			"Повторный сервер также не прошёл проверку доступности и был удалён. Автоматические попытки завершены.", iso(time.Now()), j["id"])
+		return nil
 	})
 }
 

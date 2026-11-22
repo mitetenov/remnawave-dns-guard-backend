@@ -4,9 +4,101 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestOrderVerificationRetriesOnceAfterConfirmedTimeout(t *testing.T) {
+	app, err := New(testConfig(filepath.Join(t.TempDir(), "orders.db")), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	s, m := app.s, app.orders
+	s.exec("INSERT INTO pools(id,hostname,zone_id,interval_seconds,failure_threshold,recovery_threshold) VALUES('pool','vpn.example.com','zone',30,2,2)")
+	s.exec(`INSERT INTO server_orders(id,request_id,selection_hash,pool_id,pool_hostname,zone_id,ttl,zone,country,plan,quote,group_name,
+ profile_id,profile_name,inbounds,serial,alias,domain,created_at,updated_at,stage,server_uuid,node_uuid,ip,create_attempted)
+ VALUES(?,?,'hash','pool','vpn.example.com','zone',120,'de-fra1','DE','plan','quote','nodes','profile','name','[]',1,'de-01',?,'time','time','target',?,?,?,1)`,
+		orderOriginID, orderOriginID, orderOriginDNS, orderPanelID, orderPanelNode, orderOriginOld)
+	order := func() row { return s.one("SELECT * FROM server_orders WHERE id=?", orderOriginID) }
+	started := nowSeconds()
+	if err := m.enrollTarget(order()); err != nil || num(order()["verify_deadline"]) < started+orderVerifyTimeout.Seconds() {
+		t.Fatalf("expected a full verification window after enrollment: %v, %v", err, order())
+	}
+	targetID := order()["target_id"]
+	s.exec("INSERT INTO agents(id,last_seen,healthy) VALUES('checker',?,1)", nowSeconds())
+	s.exec("INSERT INTO target_checks(target_id,agent_id,failures,last_checked_at,outcome) VALUES(?,'checker',2,?,0)", targetID, iso(fromSeconds(nowSeconds())))
+	wait := func(j row) {
+		t.Helper()
+		if err := m.finish(j); !errors.Is(err, errReplacementPending) || order()["stage"] != "verify" {
+			t.Fatalf("expected to keep verifying: %v, %v", err, order())
+		}
+	}
+	wait(order())
+	s.exec("UPDATE server_orders SET verify_deadline=? WHERE id=?", nowSeconds()-1, orderOriginID)
+	s.exec("UPDATE agents SET last_seen=0")
+	wait(order())
+	s.exec("UPDATE agents SET last_seen=?", nowSeconds())
+	s.exec("INSERT INTO agents(id,last_seen,healthy) VALUES('unchecked',?,1)", nowSeconds())
+	wait(order())
+	s.exec("DELETE FROM agents WHERE id='unchecked'")
+	loaded := order()
+	app.recordProbe(s.one("SELECT * FROM targets WHERE id=?", targetID), s.one("SELECT * FROM pools WHERE id='pool'"),
+		s.one("SELECT * FROM agents WHERE id='checker'"), Result{OK: true}, nowSeconds())
+	s.exec("UPDATE target_checks SET failures=2,successes=0,outcome=0")
+	wait(loaded)
+	if order()["verify_deadline"] != nil {
+		t.Fatal("one successful probe must disarm the deadline")
+	}
+
+	// Simulate the case with no success and acknowledge each cleanup step.
+	s.exec("UPDATE server_orders SET verify_deadline=? WHERE id=?", nowSeconds()-1, orderOriginID)
+	if err := m.finish(order()); err != nil || order()["stage"] != "deleting" || num(order()["delete_pending"]) != orderDeleteAll {
+		t.Fatalf("expected a confirmed timeout to queue cleanup: %v, %v", err, order())
+	}
+	m.finishOrderDeletionStep(order(), orderDeleteDNS)
+	m.finishOrderDeletionStep(order(), orderDeleteRemnawave)
+	if order()["stage"] != "deleting" || orderOperationID(order()) != orderOriginID {
+		t.Fatal("must wait for hosting deletion", order())
+	}
+	m.finishOrderDeletionStep(order(), orderDeleteHosting)
+	retry := order()
+	if retry["stage"] != "preflight" || orderOperationID(retry) == orderOriginID || retry["ip"] != nil || retry["target_id"] != nil ||
+		truth(retry["create_attempted"]) || retry["domain"] != orderOriginDNS || retry["quote"] != "quote" {
+		t.Fatal("expected the original order to restart with a new cloud identity", retry)
+	}
+	token := enrollmentToken()
+	s.exec("UPDATE server_orders SET stage='enrollment',create_attempted=1,enroll_digest=? WHERE id=?", digest(token), orderOriginID)
+	wire := append([]byte("\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"), make([]byte, 32)...)
+	body := `{"host_key":"ssh-ed25519 ` + base64.StdEncoding.EncodeToString(wire) + `"}`
+	for id, want := range map[string]int{orderOriginID: http.StatusUnauthorized, orderOperationID(retry): http.StatusOK} {
+		req := httptest.NewRequest(http.MethodPost, "/api/server-orders/"+id+"/enroll", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		app.Handler().ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("enrollment for %s returned %d, want %d: %s", id, rec.Code, want, rec.Body.String())
+		}
+	}
+	s.exec("UPDATE server_orders SET stage='target',server_uuid=?,node_uuid=?,ip=? WHERE id=?", orderPanelID, orderPanelNode, orderOriginNew, orderOriginID)
+	if err := m.enrollTarget(order()); err != nil || order()["target_id"] == targetID || num(order()["verify_deadline"]) <= nowSeconds() {
+		t.Fatalf("expected a new target and verification window: %v, %v", err, order())
+	}
+	s.exec("UPDATE server_orders SET verify_deadline=? WHERE id=?", nowSeconds()-1, orderOriginID)
+	s.exec("INSERT INTO target_checks(target_id,agent_id,failures,last_checked_at,outcome) VALUES(?,'checker',2,?,0)", order()["target_id"], iso(fromSeconds(nowSeconds())))
+	if err := m.finish(order()); err != nil || order()["stage"] != "deleting" {
+		t.Fatalf("expected cleanup for the failed second server: %v, %v", err, order())
+	}
+	m.finishOrderDeletionStep(order(), orderDeleteDNS)
+	m.finishOrderDeletionStep(order(), orderDeleteRemnawave)
+	m.finishOrderDeletionStep(order(), orderDeleteHosting)
+	if order()["stage"] != "unreachable" || num(order()["deleted_resources"]) != orderDeleteAll {
+		t.Fatal("a second failed VPS must end the order", order())
+	}
+}
 
 type orderOptionsInstaller struct {
 	orderInstaller
