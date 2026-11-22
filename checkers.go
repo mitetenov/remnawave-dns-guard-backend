@@ -239,6 +239,7 @@ func (a *App) recordProbe(target, pool, agent row, result Result, now float64) {
 		failures, successes, errorValue = int(num(check["failures"])), int(num(check["successes"])), reason
 	} else if result.OK {
 		failures, successes, outcome = 0, min(successes+1, int(num(pool["recovery_threshold"]))), true
+		s.exec("UPDATE server_orders SET verify_deadline=NULL WHERE target_id=? AND stage='verify' AND verify_deadline IS NOT NULL", target["id"])
 	} else {
 		if !knownErrors[reason] {
 			reason = "probe_failed"

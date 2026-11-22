@@ -28,11 +28,14 @@ func (s *Store) initializeOrderLogs() {
    SELECT NEW.id,NEW.updated_at,NEW.stage,CASE WHEN NEW.error IS NULL THEN 'info' ELSE 'error' END,
           COALESCE(NEW.error,'') WHERE changes()=0;
  END;
- CREATE TRIGGER IF NOT EXISTS server_order_log_create_attempt AFTER UPDATE OF create_attempted ON server_orders
+ DROP TRIGGER IF EXISTS server_order_log_create_attempt;
+ CREATE TRIGGER server_order_log_create_attempt AFTER UPDATE OF create_attempted ON server_orders
  WHEN NEW.create_attempted != OLD.create_attempted BEGIN
    INSERT INTO server_order_logs(order_id,recorded_at,stage,level,message)
-   VALUES(NEW.id,NEW.updated_at,NEW.stage,'info',CASE WHEN NEW.create_attempted=1
-     THEN 'Начата попытка создания сервера' ELSE 'Оператор подтвердил повторное создание' END);
+   VALUES(NEW.id,NEW.updated_at,NEW.stage,'info',CASE
+     WHEN NEW.create_attempted=1 THEN 'Начата попытка создания сервера'
+     WHEN NEW.stage='preflight' THEN 'Первый сервер удалён. Заказ повторён автоматически'
+     ELSE 'Оператор подтвердил повторное создание' END);
  END;
  CREATE TRIGGER IF NOT EXISTS server_order_log_limit AFTER INSERT ON server_order_logs BEGIN
    DELETE FROM server_order_logs WHERE order_id=NEW.order_id AND id <= (

@@ -127,8 +127,9 @@ func (m *orderManager) preflight(j row) error {
 		return err
 	}
 	token := enrollmentToken()
-	snapshot, _, zone, err := c.PrepareOrder(ctx, orderCloudRequest{OperationID: str(j["id"]), Zone: str(j["zone"]), Country: str(j["country"]), Plan: str(j["plan"]), Quote: str(j["quote"]),
-		Hostname: str(j["alias"]), Title: str(j["domain"]), SSHUser: m.sshUser, SSHKey: key, EnrollToken: token, EnrollURL: base.String() + "/api/server-orders/" + str(j["id"]) + "/enroll"})
+	operation := orderOperationID(j)
+	snapshot, _, zone, err := c.PrepareOrder(ctx, orderCloudRequest{OperationID: operation, Zone: str(j["zone"]), Country: str(j["country"]), Plan: str(j["plan"]), Quote: str(j["quote"]),
+		Hostname: str(j["alias"]), Title: str(j["domain"]), SSHUser: m.sshUser, SSHKey: key, EnrollToken: token, EnrollURL: base.String() + "/api/server-orders/" + operation + "/enroll"})
 	if err != nil {
 		return err
 	}
@@ -173,7 +174,7 @@ func (m *orderManager) provision(j row) error {
 		n, err := res.RowsAffected()
 		return n == 1, err
 	}
-	server, ip, err := c.ProvisionOrder(m.ctx, raw, str(j["id"]), str(j["server_uuid"]), claim)
+	server, ip, err := c.ProvisionOrder(m.ctx, raw, orderOperationID(j), str(j["server_uuid"]), claim)
 	if server != "" {
 		if _, ok := canonicalUUID(server); !ok || (j["server_uuid"] != nil && j["server_uuid"] != server) {
 			return errors.New("идентификатор сервера не совпадает с сохранённым заказом")
@@ -293,7 +294,7 @@ func (m *orderManager) enrollTarget(j row) error {
 	s.transaction(func() {
 		s.exec("INSERT INTO targets(id,pool_id,name,ip,remnawave_uuid,dns_present) VALUES(?,?,?,?,?,0)", id, j["pool_id"], j["alias"], j["ip"], j["node_uuid"])
 		m.a.reconciler.queueLocked(id, "enroll")
-		s.exec("UPDATE server_orders SET target_id=?,stage='verify',error=NULL,updated_at=?,next_retry=0 WHERE id=?", id, iso(time.Now()), j["id"])
+		s.exec("UPDATE server_orders SET target_id=?,stage='verify',verify_deadline=?,error=NULL,updated_at=?,next_retry=0 WHERE id=?", id, nowSeconds()+orderVerifyTimeout.Seconds(), iso(time.Now()), j["id"])
 	})
 	return nil
 }
@@ -302,15 +303,33 @@ func (m *orderManager) finish(j row) error {
 	a, s := m.a, m.a.s
 	a.reconciler.dnsMu.Lock()
 	defer a.reconciler.dnsMu.Unlock()
-	var ready bool
+	var ready, deleting bool
 	a.withStore(func() any {
 		t := s.one("SELECT * FROM targets WHERE id=?", j["target_id"])
-		if t != nil && t["ip"] == j["ip"] && t["dns_action"] == nil && !truth(t["dns_uncertain"]) && truth(t["manual_enabled"]) && truth(t["dns_present"]) {
+		if t == nil || t["ip"] != j["ip"] || !truth(t["manual_enabled"]) {
+			return nil
+		}
+		now := nowSeconds()
+		published := t["dns_action"] == nil && !truth(t["dns_uncertain"]) && truth(t["dns_present"])
+		timedOut := j["verify_deadline"] != nil && num(j["verify_deadline"]) <= now && t["dns_action"] == "enroll" && !truth(t["dns_present"])
+		if published || timedOut {
 			pool := s.one("SELECT id,interval_seconds,failure_threshold,recovery_threshold FROM pools WHERE id=?", t["pool_id"])
-			ready = s.targetProbeSummary(t["id"], pool).Restore
+			probes := s.targetProbeSummary(t["id"], pool)
+			ready = published && probes.Restore
+			if timedOut && probes.Remove && probes.Active == probes.Checked {
+				// A successful result may have cleared the deadline after this order was loaded.
+				res := s.exec(`UPDATE server_orders SET stage='deleting',delete_pending=?,delete_unreachable=1,verify_deadline=NULL,enroll_digest=NULL,error=?,updated_at=?,next_retry=0
+ WHERE id=? AND stage='verify' AND verify_deadline<=?`, orderDeleteAll,
+					"IP "+str(j["ip"])+" не прошёл проверку доступности за 10 минут после настройки. Начато удаление сервера.", iso(time.Now()), j["id"], now)
+				n, _ := res.RowsAffected()
+				deleting = n == 1
+			}
 		}
 		return nil
 	})
+	if deleting {
+		return nil
+	}
 	if !ready {
 		return errReplacementPending
 	}
@@ -340,9 +359,7 @@ func (m *orderManager) finish(j row) error {
 		}
 	}
 	m.advance(j, "complete", func() {
-		if autoHostID != "" {
-			s.exec("UPDATE server_orders SET auto_host_uuid=? WHERE id=?", autoHostID, j["id"])
-		}
+		s.exec("UPDATE server_orders SET auto_host_uuid=NULLIF(?,''),verify_deadline=NULL WHERE id=?", autoHostID, j["id"])
 		if str(j["provider"]) != virtuaOrderProvider {
 			s.exec("INSERT INTO replacement_bindings(target_id,provider,server_uuid,node_uuid,enabled) VALUES(?,'upcloud',?,?,1)", j["target_id"], j["server_uuid"], j["node_uuid"])
 		}
@@ -375,7 +392,7 @@ func (m *orderManager) cleanupOrderScript(j row) error {
 	if err != nil {
 		return errors.New("не удалось прочитать скрипт сохранённого заказа Virtua.Cloud")
 	}
-	snap, err := readVirtuaSnapshot(raw, str(j["id"]))
+	snap, err := readVirtuaSnapshot(raw, orderOperationID(j))
 	if err != nil {
 		return err
 	}
