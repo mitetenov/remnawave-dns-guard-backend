@@ -153,12 +153,16 @@ func (f *fakeReplacementUpCloud) request(req *http.Request) (*http.Response, err
 		f.old.State = "stopped"
 		return response(row{}, 202), nil
 	case "DELETE /server/" + testUpCloudOldServer:
-		if f.old.State != "stopped" || f.addr.ReleasePolicy != "keep" || req.URL.RawQuery != "" {
-			f.t.Fatalf("server deletion requested before shutdown/IP hold or with storage flags: %v", req.URL)
+		if f.old.State != "stopped" || req.URL.RawQuery != "" {
+			f.t.Fatalf("server deletion requested before shutdown or with storage flags: %v", req.URL)
 		}
 		f.old.State = "deleted"
 		f.owner = ""
-		f.addr.Server, f.addr.MAC, f.addr.Floating = "", "", "yes"
+		if f.addr.ReleasePolicy == "keep" {
+			f.addr.Server, f.addr.MAC, f.addr.Floating = "", "", "yes"
+		} else {
+			f.addr = upCloudIP{}
+		}
 		return response(row{}, 204), nil
 	case "GET /server":
 		if q := req.URL.Query().Get("label"); q != upCloudReplacementLabel+"="+testUpCloudOperation {
@@ -170,8 +174,8 @@ func (f *fakeReplacementUpCloud) request(req *http.Request) (*http.Response, err
 		}
 		return response(row{"servers": row{"server": matches}}, 200), nil
 	case "POST /server":
-		if f.owner != "" || f.addr.Floating != "yes" || f.addr.ReleasePolicy != "keep" {
-			f.t.Fatal("create attempted before original disk was detached and address reserved")
+		if f.old.State != "deleted" || f.owner != "" {
+			f.t.Fatal("create attempted before the original VM was deleted and its disk detached")
 		}
 		var body struct {
 			Server struct {
@@ -231,31 +235,84 @@ func upCloudTestError(status int, code string) *http.Response {
 	return response(row{"error": row{"error_code": code}}, status)
 }
 
-func retireFakeUpCloud(t *testing.T, provider replacementProvider) json.RawMessage {
+func snapshotFakeUpCloud(t *testing.T, provider replacementProvider) json.RawMessage {
 	t.Helper()
-	ctx := context.Background()
-	snap, err := provider.Snapshot(ctx, testUpCloudOldServer, testUpCloudOldIP, testUpCloudOperation)
+	snap, err := provider.Snapshot(context.Background(), testUpCloudOldServer, testUpCloudOldIP, testUpCloudOperation)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return snap
+}
+
+func retireFakeUpCloud(t *testing.T, provider replacementProvider) json.RawMessage {
+	t.Helper()
+	ctx := context.Background()
+	snap := snapshotFakeUpCloud(t, provider)
 	if err := provider.Retire(ctx, testUpCloudOldServer, testUpCloudOldIP, snap); !errors.Is(err, errReplacementPending) || !strings.Contains(err.Error(), "shut down gracefully") {
 		t.Fatalf("expected a graceful stop before deletion, got %v", err)
+	}
+	if err := provider.Retire(ctx, testUpCloudOldServer, testUpCloudOldIP, snap); !errors.Is(err, errReplacementPending) || !strings.Contains(err.Error(), "confirm deletion") {
+		t.Fatalf("expected deletion to be confirmed before provisioning, got %v", err)
+	}
+	if err := provider.Retire(ctx, testUpCloudOldServer, testUpCloudOldIP, snap); err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+func TestUpCloudReplacementRecreatesServerWithoutAddressRequests(t *testing.T) {
+	fake, provider := newFakeReplacementUpCloud(t)
+	fake.old.Host, fake.next.Host = "8055964291", "8055964292"
+	fake.addr.Floating = "" // The address endpoint may omit this even when the NIC reports it.
+	snap := retireFakeUpCloud(t, provider)
+	ctx := context.Background()
+	id, ip, err := provider.Provision(ctx, snap, testUpCloudOperation, testUpCloudOldIP, func() (bool, error) {
+		return true, nil
+	})
+	if err != nil || id != testUpCloudNewServer || ip != testUpCloudNewIP {
+		t.Fatalf("recreating the server yielded (%s, %s, %v)", id, ip, err)
+	}
+	if err := provider.ReleaseOldIP(ctx, snap, id, ip, testUpCloudOldIP); err != nil {
+		t.Fatalf("finishing the replacement: %v", err)
+	}
+	var mutations []string
+	for _, call := range fake.calls {
+		if strings.Contains(call, "/ip_address/") {
+			t.Fatalf("server recreation made a separate address request: %s", call)
+		}
+		if !strings.HasPrefix(call, "GET ") {
+			mutations = append(mutations, call)
+		}
+	}
+	want := []string{"POST /server/" + testUpCloudOldServer + "/stop", "DELETE /server/" + testUpCloudOldServer, "POST /server"}
+	if !slices.Equal(mutations, want) {
+		t.Fatalf("mutations %v do not match %v", mutations, want)
+	}
+}
+
+func TestUpCloudReplacementResumesLegacySnapshotAfterLostResponses(t *testing.T) {
+	fake, provider := newFakeReplacementUpCloud(t)
+	fake.createError = "lost-after"
+	fake.loseCleanup = true
+	var legacy upCloudSnapshot
+	if err := json.Unmarshal(snapshotFakeUpCloud(t, provider), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	legacy.ReleaseWithServer = false
+	legacy.OldIP = fake.addr
+	snap, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := provider.Retire(ctx, testUpCloudOldServer, testUpCloudOldIP, snap); !errors.Is(err, errReplacementPending) {
+		t.Fatalf("expected the original VM to stop, got %v", err)
 	}
 	for range 2 {
 		if err := provider.Retire(ctx, testUpCloudOldServer, testUpCloudOldIP, snap); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return snap
-}
-
-func TestUpCloudReplacementRecoversLostCreateAndCleanupResponses(t *testing.T) {
-	fake, provider := newFakeReplacementUpCloud(t)
-	fake.old.Host, fake.next.Host = "8055964291", "8055964292"
-	fake.createError = "lost-after"
-	fake.loseCleanup = true
-	snap := retireFakeUpCloud(t, provider)
-	ctx := context.Background()
 	var claimed bool
 	claimCreate := func() (bool, error) {
 		if claimed {
@@ -351,13 +408,15 @@ func TestUpCloudReplacementPreservesExplicitFirewallDefaults(t *testing.T) {
 	}
 }
 
-func TestUpCloudReplacementRefusesCustomFirewallAndAncillaryAddress(t *testing.T) {
-	for _, scenario := range []string{"custom-firewall", "retained-IPv6", "explicit-utility"} {
+func TestUpCloudReplacementRefusesUnsupportedFirewallAndAddresses(t *testing.T) {
+	for _, scenario := range []string{"custom-firewall", "retained-IPv4", "retained-IPv6", "explicit-utility"} {
 		t.Run(scenario, func(t *testing.T) {
 			fake, provider := newFakeReplacementUpCloud(t)
 			switch scenario {
 			case "custom-firewall":
 				fake.oldFirewall = []row{{"direction": "in", "action": "accept", "position": "1", "destination_port_start": "22"}}
+			case "retained-IPv4":
+				fake.old.Networking.Interfaces.Items[0].IPs.Items[0].ReleasePolicy = "keep"
 			case "retained-IPv6":
 				fake.old.Networking.Interfaces.Items[2].IPs.Items[0].ReleasePolicy = "keep"
 			case "explicit-utility":
@@ -461,10 +520,13 @@ func TestUpCloudReplacementRefusesMismatchedRecovery(t *testing.T) {
 	}
 	fake.next.Networking.Interfaces.Items[0].IPs.Items[0].Address = testUpCloudNewIP
 	fake.next.Disks.Items[0].ID = "019d64ef-31d1-4684-a26b-c86c955cbf46"
+	fake.calls = nil
 	if err := provider.ReleaseOldIP(ctx, snap, testUpCloudNewServer, testUpCloudNewIP, testUpCloudOldIP); err == nil {
-		t.Fatal("released original address for a VM with different disks")
+		t.Fatal("completed replacement for a VM with different disks")
 	}
-	if fake.addr.Address != testUpCloudOldIP {
-		t.Fatal("cleanup removed the original IPv4")
+	for _, call := range fake.calls {
+		if !strings.HasPrefix(call, "GET ") {
+			t.Fatalf("mismatched replacement mutated with %s", call)
+		}
 	}
 }
