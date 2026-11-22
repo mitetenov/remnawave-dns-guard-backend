@@ -198,14 +198,15 @@ type upCloudNICSpec struct {
 }
 
 type upCloudSnapshot struct {
-	ServerID    string           `json:"server_id"`
-	OperationID string           `json:"operation_id"`
-	OldIP       upCloudIP        `json:"old_ip"`
-	Config      upCloudConfig    `json:"config"`
-	Disks       []upCloudDisk    `json:"disks"`
-	Labels      []upCloudLabel   `json:"labels"`
-	NICs        []upCloudNICSpec `json:"nics"`
-	Firewall    upCloudFirewall  `json:"firewall"`
+	ServerID          string           `json:"server_id"`
+	OperationID       string           `json:"operation_id"`
+	OldIP             upCloudIP        `json:"old_ip"`
+	Config            upCloudConfig    `json:"config"`
+	Disks             []upCloudDisk    `json:"disks"`
+	Labels            []upCloudLabel   `json:"labels"`
+	NICs              []upCloudNICSpec `json:"nics"`
+	Firewall          upCloudFirewall  `json:"firewall"`
+	ReleaseWithServer bool             `json:"release_with_server,omitempty"` // Older snapshots reserve the original address.
 }
 
 type upCloudFirewall struct {
@@ -570,15 +571,10 @@ func (c *upCloudReplacement) Snapshot(ctx context.Context, serverID, oldIP, oper
 	if snap.OldIP.Address != oldIP {
 		return nil, errors.New("UpCloud server UUID does not have the target's public IPv4 address")
 	}
-	ip, err := c.address(ctx, oldIP)
-	if err != nil {
-		return nil, err
+	if !snap.OldIP.releasedWithServer() {
+		return nil, errors.New("UpCloud target IPv4 must be non-floating and released when the server is deleted")
 	}
-	if ip.Server != id || ip.MAC != snap.OldIP.MAC || ip.Zone != snap.Config.Zone || ip.Access != "public" ||
-		ip.Family != "IPv4" || ip.Floating != "no" || ip.delegated() || ip.ReleasePolicy != "release" {
-		return nil, errors.New("UpCloud target IPv4 cannot be safely reserved for the replacement")
-	}
-	snap.OldIP = ip
+	snap.ReleaseWithServer = true
 	if err := c.checkDisks(ctx, snap, id); err != nil {
 		return nil, err
 	}
@@ -602,9 +598,14 @@ func decodeUpCloudSnapshot(data json.RawMessage, oldIP string) (upCloudSnapshot,
 	}
 	id, ok := canonicalUUID(snap.ServerID)
 	if !ok || id != snap.ServerID || !publicIPv4(oldIP) || snap.OldIP.Address != oldIP ||
-		snap.OldIP.Server != snap.ServerID || snap.OldIP.Zone != snap.Config.Zone || snap.OperationID == "" ||
-		snap.OldIP.Access != "public" || snap.OldIP.Family != "IPv4" || snap.OldIP.ReleasePolicy != "release" ||
-		snap.OldIP.Floating != "no" || len(snap.Disks) == 0 {
+		snap.OperationID == "" || len(snap.Disks) == 0 || snap.OldIP.Family != "IPv4" || !snap.OldIP.releasedWithServer() {
+		return upCloudSnapshot{}, errors.New("UpCloud replacement snapshot does not match the original server and public IPv4")
+	}
+	if snap.ReleaseWithServer {
+		if snap.OldIP.MAC == "" || snap.OldIP.DHCPProvided != "yes" {
+			return upCloudSnapshot{}, errors.New("UpCloud replacement snapshot is missing the original public IPv4 interface")
+		}
+	} else if snap.OldIP.Server != snap.ServerID || snap.OldIP.Zone != snap.Config.Zone || snap.OldIP.Access != "public" {
 		return upCloudSnapshot{}, errors.New("UpCloud replacement snapshot does not match the original server and public IPv4")
 	}
 	return snap, nil
@@ -617,6 +618,10 @@ func (s upCloudSnapshot) matchesAddress(ip upCloudIP) bool {
 
 func (ip upCloudIP) delegated() bool {
 	return ip.IsDelegated == "yes" || !oneOf(ip.DelegatedTo.String(), "", "0")
+}
+
+func (ip upCloudIP) releasedWithServer() bool {
+	return ip.Floating == "no" && ip.ReleasePolicy == "release" && !ip.delegated()
 }
 
 func (s upCloudSnapshot) holdsAddress(ip upCloudIP) bool {
@@ -642,6 +647,9 @@ func (c *upCloudReplacement) Retire(ctx context.Context, serverID, oldIP string,
 	}
 	server, err := c.server(ctx, id)
 	if upCloudStatus(err, http.StatusNotFound, "SERVER_NOT_FOUND") {
+		if snap.ReleaseWithServer {
+			return nil
+		}
 		return c.confirmHeld(ctx, snap)
 	}
 	if err != nil {
@@ -671,27 +679,12 @@ func (c *upCloudReplacement) Retire(ctx context.Context, serverID, oldIP string,
 	if firewall != snap.Firewall {
 		return errors.New("UpCloud server firewall changed after the replacement was requested")
 	}
-	ip, err := c.address(ctx, oldIP)
-	if err != nil {
+	if snap.ReleaseWithServer {
+		if !actual.OldIP.releasedWithServer() {
+			return errors.New("UpCloud target IPv4 release settings changed after the replacement was requested")
+		}
+	} else if err := c.reserveOldIP(ctx, snap); err != nil {
 		return err
-	}
-	if !snap.matchesAddress(ip) || ip.Server != id || ip.MAC != snap.OldIP.MAC || ip.Floating != "no" ||
-		!oneOf(ip.ReleasePolicy, "release", "keep") {
-		return errors.New("the original UpCloud IPv4 no longer matches the replacement snapshot")
-	}
-	if ip.ReleasePolicy == "release" {
-		input := row{"ip_address": row{"release_policy": "keep"}}
-		if err := c.request(ctx, http.MethodPatch, "/ip_address/"+oldIP, input, nil); err != nil {
-			return err
-		}
-		// Verify persisted details using GET. PATCH responses may omit fields.
-		ip, err = c.address(ctx, oldIP)
-		if err != nil {
-			return err
-		}
-		if !snap.matchesAddress(ip) || ip.Server != id || ip.MAC != snap.OldIP.MAC || ip.Floating != "no" || ip.ReleasePolicy != "keep" {
-			return errors.New("UpCloud has not confirmed the hold on the original IPv4")
-		}
 	}
 	if server.State == "started" {
 		input := row{"stop_server": row{"stop_type": "soft"}}
@@ -700,10 +693,41 @@ func (c *upCloudReplacement) Retire(ctx context.Context, serverID, oldIP string,
 		}
 		return fmt.Errorf("%w: waiting for the original UpCloud server to shut down gracefully", errReplacementPending)
 	}
+	// Delete the VM only. The attached disks are reused when creating its replacement.
 	if err := c.request(ctx, http.MethodDelete, "/server/"+id, nil, nil); err != nil && !upCloudStatus(err, http.StatusNotFound, "SERVER_NOT_FOUND") {
 		return err
 	}
+	if snap.ReleaseWithServer {
+		return fmt.Errorf("%w: waiting for UpCloud to confirm deletion of the original server", errReplacementPending)
+	}
 	return c.confirmHeld(ctx, snap)
+}
+
+func (c *upCloudReplacement) reserveOldIP(ctx context.Context, snap upCloudSnapshot) error {
+	path := "/ip_address/" + snap.OldIP.Address
+	ip, err := c.address(ctx, snap.OldIP.Address)
+	if err != nil {
+		return err
+	}
+	if !snap.matchesAddress(ip) || ip.Server != snap.ServerID || ip.MAC != snap.OldIP.MAC || ip.Floating != "no" ||
+		!oneOf(ip.ReleasePolicy, "release", "keep") {
+		return errors.New("the original UpCloud IPv4 no longer matches the replacement snapshot")
+	}
+	if ip.ReleasePolicy == "keep" {
+		return nil
+	}
+	input := row{"ip_address": row{"release_policy": "keep"}}
+	if err := c.request(ctx, http.MethodPatch, path, input, nil); err != nil {
+		return err
+	}
+	ip, err = c.address(ctx, snap.OldIP.Address)
+	if err != nil {
+		return err
+	}
+	if !snap.matchesAddress(ip) || ip.Server != snap.ServerID || ip.MAC != snap.OldIP.MAC || ip.Floating != "no" || ip.ReleasePolicy != "keep" {
+		return errors.New("UpCloud has not confirmed the hold on the original IPv4")
+	}
+	return nil
 }
 
 func (s upCloudSnapshot) createRequest() row {
@@ -814,8 +838,10 @@ func (c *upCloudReplacement) Provision(ctx context.Context, data json.RawMessage
 	if snap.OperationID != operationID || claimCreate == nil {
 		return "", "", errors.New("UpCloud provisioning does not match the replacement operation")
 	}
-	if err := c.confirmHeld(ctx, snap); err != nil {
-		return "", "", err
+	if !snap.ReleaseWithServer {
+		if err := c.confirmHeld(ctx, snap); err != nil {
+			return "", "", err
+		}
 	}
 	id, err := c.findOperationServer(ctx, upCloudReplacementLabel, operationID)
 	if err != nil {
@@ -877,7 +903,10 @@ func (c *upCloudReplacement) ReleaseOldIP(ctx context.Context, data json.RawMess
 		return err
 	}
 	if actualIP != newIP {
-		return errors.New("UpCloud replacement IPv4 changed before release of the original IPv4")
+		return errors.New("UpCloud replacement IPv4 changed before the operation could be completed")
+	}
+	if snap.ReleaseWithServer {
+		return nil
 	}
 	ip, err := c.address(ctx, oldIP)
 	if upCloudStatus(err, http.StatusNotFound, "IP_ADDRESS_NOT_FOUND") || upCloudStatus(err, http.StatusForbidden, "IP_ADDRESS_FORBIDDEN") {
