@@ -13,6 +13,7 @@ var bundledOrderTaskPath = regexp.MustCompile(`^(playbooks/nodes(-wl)?\.yml|role
 // contain node secrets, including in SSH failure messages and task names.
 type orderPlaybookDiagnostics struct {
 	alias   string
+	ip      string
 	bundled bool
 	line    []byte
 	drop    bool
@@ -50,8 +51,17 @@ func (d *orderPlaybookDiagnostics) observe(line string) {
 			d.task = path
 		}
 	}
-	result, ok := strings.CutPrefix(line, "fatal: ["+d.alias+"]: ")
+	failure, ok := strings.CutPrefix(line, "fatal: [")
 	if !ok {
+		return
+	}
+	label, result, ok := strings.Cut(failure, "]: ")
+	if !ok {
+		return
+	}
+	switch label {
+	case d.alias, d.alias + " -> localhost", d.alias + " -> localhost(" + d.ip + ")":
+	default:
 		return
 	}
 	if payload, ok := strings.CutPrefix(result, "UNREACHABLE! => "); ok {
