@@ -105,6 +105,9 @@ func (s *Store) initializeOrders() {
 			s.exec("ALTER TABLE server_orders ADD COLUMN " + name + " INTEGER NOT NULL DEFAULT 0")
 		}
 	}
+	if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == "auto_host_uuid" }) {
+		s.exec("ALTER TABLE server_orders ADD COLUMN auto_host_uuid TEXT")
+	}
 	s.exec("CREATE INDEX IF NOT EXISTS server_orders_target ON server_orders(target_id)")
 	s.initializeOrderLogs()
 }

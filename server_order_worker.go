@@ -117,6 +117,11 @@ func (m *orderManager) preflight(j row) error {
 	if err = panel.checkOrderHosts(ctx, str(j["pool_hostname"]), ids); err != nil {
 		return err
 	}
+	if m.a.config.OrderAutoHostTag != "" {
+		if err = panel.checkTaggedOrderHost(ctx, j, ids); err != nil {
+			return err
+		}
+	}
 	c, err := m.cloudFor(str(j["provider"]))
 	if err != nil {
 		return err
@@ -317,7 +322,24 @@ func (m *orderManager) finish(j row) error {
 	if err = p.attachOrderHosts(m.ctx, str(j["pool_hostname"]), str(j["node_uuid"]), ids...); err != nil {
 		return err
 	}
+	var autoHostID string
+	if tag := a.config.OrderAutoHostTag; tag != "" {
+		dns, err := a.dnsProvider()
+		if err != nil {
+			return err
+		}
+		if _, err = dns.checkOrderOrigin(j, "", str(j["ip"]), false); err != nil {
+			return err
+		}
+		autoHostID, err = p.ensureTaggedOrderHost(m.ctx, j, ids, tag)
+		if err != nil {
+			return err
+		}
+	}
 	m.advance(j, "complete", func() {
+		if autoHostID != "" {
+			s.exec("UPDATE server_orders SET auto_host_uuid=? WHERE id=?", autoHostID, j["id"])
+		}
 		if str(j["provider"]) != virtuaOrderProvider {
 			s.exec("INSERT INTO replacement_bindings(target_id,provider,server_uuid,node_uuid,enabled) VALUES(?,'upcloud',?,?,1)", j["target_id"], j["server_uuid"], j["node_uuid"])
 		}

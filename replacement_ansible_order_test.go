@@ -203,6 +203,11 @@ if [ "$1" = -l ]; then cat >/dev/null; else printf 'ssh-ed25519 AAAA login-comme
 			if calls := f.read(t, "playbook-calls"); strings.Count(calls, "run "+alias+" "+filepath.Join(f.repo, "playbooks", tc.playbook)+"\n") != 1 {
 				t.Fatal("new node must execute the selected playbook once")
 			}
+			writeReplacementRepositoryFixture(t, filepath.Join(f.root, "unreachable-run"), "", 0o600)
+			err = runner.RunOrder(context.Background(), "8.8.4.4", replacementTestNodeID, order)
+			if want := tc.playbook + " playbook failed (exit 4): SSH-соединение отклонено"; err == nil || err.Error() != want {
+				t.Fatalf("expected safe order diagnostic %q, got %v", want, err)
+			}
 		})
 	}
 }

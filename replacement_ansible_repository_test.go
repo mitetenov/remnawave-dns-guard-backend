@@ -200,6 +200,10 @@ if [ "$mode" = list ]; then
   exit 0
 fi
 if [ "$mode" = run ]; then
+  if [ -f "$observer/unreachable-run" ]; then
+    printf 'fatal: [%s]: UNREACHABLE! => {"msg":"ssh: Connection refused; fixture-playbook-secret"}\n' "$limit"
+    exit 4
+  fi
   cp "$inventory" "$observer/captured-inventory"
   cp "$vars" "$observer/captured-vars"
   cp "${vars%/*}/known_hosts" "$observer/captured-host-keys"

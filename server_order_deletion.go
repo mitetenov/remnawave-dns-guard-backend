@@ -213,12 +213,15 @@ func (r *Remnawave) deleteOrderNode(ctx context.Context, order row) error {
 		if node.Address != order["ip"] && !strings.EqualFold(strings.TrimSuffix(node.Address, "."), str(order["domain"])) {
 			return integration("Адрес ноды Remnawave не совпадает с IP или доменом сервера")
 		}
+		if err := r.deleteTaggedOrderHost(ctx, order); err != nil {
+			return err
+		}
 		if err := r.orderRequest(ctx, http.MethodDelete, "nodes/"+id, nil, nil); err != nil {
 			return err
 		}
 		return errReplacementPending
 	}
-	return nil
+	return r.deleteTaggedOrderHost(ctx, order)
 }
 
 func (m *orderManager) deleteOrderServer(j row) error {
