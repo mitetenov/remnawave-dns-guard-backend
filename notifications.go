@@ -73,6 +73,7 @@ func (a *App) notificationRoutes() {
 				if changed {
 					// A pause or destination change discards pending messages. Resuming
 					// starts from the current state instead of replaying old changes.
+					a.s.refreshProbeTargets(nowSeconds())
 					a.s.exec("DELETE FROM notification_outbox")
 					a.s.exec(notificationResetSQL)
 				}
@@ -95,8 +96,8 @@ func (a *App) notificationRoutes() {
 	})
 }
 
-// The worker refreshes the same Go projection as targetViews before reading
-// this view, including transitions caused by checker heartbeat expiry.
+// The worker and probe handlers write the same Go projection as targetViews.
+// The triggers observe that projection inside the transaction that changed it.
 func (s *Store) initializeNotifications() {
 	s.transaction(func() {
 		s.exec(`CREATE TABLE IF NOT EXISTS notification_control (id INTEGER PRIMARY KEY CHECK(id=1), enabled INTEGER NOT NULL DEFAULT 0);
@@ -127,7 +128,7 @@ func (s *Store) initializeNotifications() {
 		s.exec(`CREATE TRIGGER notification_target_insert AFTER INSERT ON targets BEGIN
  INSERT INTO notification_target_status (target_id,status,terminal_status) SELECT v.id,v.status,` + notificationSeedSQL + ` FROM notification_target_states v WHERE v.id=NEW.id;
  END;
- CREATE TRIGGER notification_target_update AFTER UPDATE OF status ON targets BEGIN
+ CREATE TRIGGER notification_target_update AFTER UPDATE OF status ON targets WHEN NEW.status IS NOT OLD.status BEGIN
  ` + notificationEnqueueSQL + ` AND v.id=NEW.id;
  ` + notificationObserveSQL("v.id=NEW.id") + `;
  END;`)
@@ -145,20 +146,21 @@ var notificationEnqueueSQL = `INSERT INTO notification_outbox (target_name,ip,po
  WHERE ` + notificationEventSQL + ` AND (SELECT enabled FROM notification_control WHERE id=1)=1`
 
 type Notifier struct {
-	s       *Store
-	client  *http.Client
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{}
-	mu      sync.Mutex
-	started bool
+	s               *Store
+	client          *http.Client
+	ctx             context.Context
+	cancel          context.CancelFunc
+	done            chan struct{}
+	mu              sync.Mutex
+	started         bool
+	baselinePending bool
 }
 
 func newNotifier(s *Store, client *http.Client) *Notifier {
 	ctx, cancel := context.WithCancel(context.Background())
 	copy := *client
 	copy.Timeout = 10 * time.Second
-	return &Notifier{s: s, client: &copy, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	return &Notifier{s: s, client: &copy, ctx: ctx, cancel: cancel, done: make(chan struct{}), baselinePending: true}
 }
 
 func (n *Notifier) start() {
@@ -202,10 +204,15 @@ func (n *Notifier) runOnce() {
 		n.s.mu.Lock()
 		defer n.s.mu.Unlock()
 		n.s.transaction(func() {
-			n.s.refreshProbeTargets()
-			n.s.exec(notificationEnqueueSQL)
-			n.s.exec(notificationBaselineSQL)
+			n.s.refreshProbeTargets(nowSeconds())
+			// Catch up any baseline left by an older database. After startup the
+			// per-target triggers keep the baseline and outbox in sync.
+			if n.baselinePending {
+				n.s.exec(notificationEnqueueSQL)
+				n.s.exec(notificationBaselineSQL)
+			}
 		})
+		n.baselinePending = false
 		if !truth(n.s.one("SELECT enabled FROM notification_control WHERE id=1")["enabled"]) {
 			return
 		}

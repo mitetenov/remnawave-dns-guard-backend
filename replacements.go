@@ -92,38 +92,47 @@ func (w *replacementWorker) close() { w.cancel(); w.wg.Wait() }
 // The timer uses the same fresh removal vote and protected-final-record state
 // as DNS Guard. A missing record alone is also possible for a newly enrolled IP.
 func replacementBlocked(t, p row, summary probeSummary) bool {
+	status, _ := summary.statuses(t)
 	return truth(t["manual_enabled"]) && truth(p["automation_enabled"]) && t["dns_action"] == nil &&
-		!truth(t["dns_uncertain"]) && summary.Remove && oneOf(str(summary.project(t)["status"]), "excluded", "protected")
+		!truth(t["dns_uncertain"]) && summary.Remove && oneOf(status, "excluded", "protected")
 }
 
 func replacementDue(since any, now float64) bool {
 	return since != nil && now-num(since) >= replacementDelay.Seconds()
 }
 
-func (s *Store) observeReplacement(t, p row, summary probeSummary, now float64) {
-	b := s.one("SELECT * FROM replacement_bindings WHERE target_id=? AND enabled=1", t["id"])
-	if b == nil || s.one("SELECT id FROM server_orders WHERE target_id=? AND stage='deleting'", t["id"]) != nil {
-		return
+const replacementObservedBindings = `SELECT b.target_id,b.provider,b.server_uuid,b.node_uuid,b.blocked_since,
+ EXISTS(SELECT 1 FROM replacement_jobs WHERE target_id=b.target_id AND ` + replacementActive + `) AS active
+ FROM replacement_bindings b`
+
+const replacementObservedFilter = `b.enabled=1 AND NOT EXISTS(SELECT 1 FROM server_orders WHERE target_id=b.target_id AND stage='deleting')`
+
+func (s *Store) observeReplacement(t, p, b row, summary probeSummary, now float64) float64 {
+	if b == nil {
+		return 0
 	}
 	if !replacementBlocked(t, p, summary) {
 		if b["blocked_since"] != nil {
 			s.exec("UPDATE replacement_bindings SET blocked_since=NULL WHERE target_id=?", t["id"])
 		}
-		return
+		return 0
+	}
+	delay := replacementDelay.Seconds()
+	if b["blocked_since"] != nil && !replacementDue(b["blocked_since"], now) {
+		return num(b["blocked_since"]) + delay
+	}
+	if truth(b["active"]) {
+		return 0
 	}
 	if b["blocked_since"] == nil {
-		if s.activeReplacement(t["id"]) == nil {
-			s.exec("UPDATE replacement_bindings SET blocked_since=? WHERE target_id=?", now, t["id"])
-		}
-		return
-	}
-	if !replacementDue(b["blocked_since"], now) || s.activeReplacement(t["id"]) != nil {
-		return
+		s.exec("UPDATE replacement_bindings SET blocked_since=? WHERE target_id=?", now, t["id"])
+		return now + delay
 	}
 	stamp := iso(fromSeconds(now))
 	s.exec(`INSERT INTO replacement_jobs(id,target_id,pool_id,name,provider,server_uuid,node_uuid,old_ip,stage,created_at,updated_at)
  VALUES(?,?,?,?,?,?,?,?,'preflight',?,?)`, uid(), t["id"], p["id"], t["name"], b["provider"], b["server_uuid"], b["node_uuid"], t["ip"], stamp, stamp)
 	s.event("warning", "system", "Начата проверка перед автозаменой сервера", p["id"], t["id"])
+	return 0
 }
 
 // Re-read after external preflight calls. Once the retirement intent commits,
@@ -135,8 +144,8 @@ func (w *replacementWorker) preflightCurrent(j row) bool {
 	if t == nil || b == nil || !truth(b["enabled"]) || !replacementDue(b["blocked_since"], nowSeconds()) || t["ip"] != j["old_ip"] || b["provider"] != j["provider"] || b["server_uuid"] != j["server_uuid"] || b["node_uuid"] != j["node_uuid"] {
 		return false
 	}
-	view := s.probeSnapshot()
-	return replacementBlocked(t, view.pools[str(t["pool_id"])], view.summary(t))
+	p := s.one("SELECT id,automation_enabled,interval_seconds,failure_threshold,recovery_threshold FROM pools WHERE id=?", t["pool_id"])
+	return replacementBlocked(t, p, s.targetProbeSummary(t["id"], p))
 }
 
 func (w *replacementWorker) runOnce() {
@@ -600,7 +609,7 @@ func (w *replacementWorker) recovered(j row) bool {
 	defer s.mu.Unlock()
 	t := s.one("SELECT * FROM targets WHERE id=?", j["target_id"])
 	p := s.one("SELECT * FROM pools WHERE id=?", j["pool_id"])
-	return t["ip"] == j["new_ip"] && truth(p["automation_enabled"]) && truth(t["manual_enabled"]) && s.probeSnapshot().summary(t).Restore
+	return t["ip"] == j["new_ip"] && truth(p["automation_enabled"]) && truth(t["manual_enabled"]) && s.targetProbeSummary(t["id"], p).Restore
 }
 
 // Cloudflare encodes its automatic TTL as 1 (five minutes).

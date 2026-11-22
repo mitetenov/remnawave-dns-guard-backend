@@ -4,9 +4,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestProviderReadinessReturnsOnlyConfigurationStatus(t *testing.T) {
+	a, request := panelTestApp(t)
+	a.s.set("upcloud_token", "upcloud-token-fixture")
+	a.s.set("virtua_token", "virtua-token-fixture")
+	response := request(http.MethodGet, "/api/settings/providers")
+	var result row
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil ||
+		len(result) != 6 || !truth(result["upcloud_configured"]) || !truth(result["virtua_configured"]) ||
+		strings.Contains(response.Body.String(), "token-fixture") {
+		t.Fatalf("unexpected provider readiness response: %d %s", response.Code, response.Body)
+	}
+}
 
 func TestReplacementRequiresConfirmedBlockedState(t *testing.T) {
 	for _, tc := range []struct {
@@ -125,23 +139,23 @@ VALUES(?,?, 'node', '198.51.100.1', 1, 'excluded', 0, 0, ?)`, targetID, poolID, 
 VALUES(?,?,0,1,0,?,'probe_failed',0)`, targetID, agentID, checked)
 	s.exec(`INSERT INTO replacement_bindings(target_id,provider,server_uuid,node_uuid,enabled) VALUES(?, 'upcloud', 'server-1', 'node-1', 1)`, targetID)
 
-	s.refreshProbeTargets()
+	s.transaction(func() { s.refreshProbeTargets(nowSeconds()) })
 	binding := s.one("SELECT blocked_since FROM replacement_bindings WHERE target_id=?", targetID)
 	if binding == nil || binding["blocked_since"] == nil {
 		t.Fatal("fresh blocked probe did not start the replacement timer")
 	}
 
 	s.exec("UPDATE target_checks SET last_checked_at=? WHERE target_id=?", iso(fromSeconds(now-300)), targetID)
-	s.refreshProbeTargets()
+	s.transaction(func() { s.refreshProbeTargets(nowSeconds()) })
 	binding = s.one("SELECT blocked_since FROM replacement_bindings WHERE target_id=?", targetID)
 	if binding == nil || binding["blocked_since"] != nil {
 		t.Fatal("stale blocked evidence did not reset the replacement timer")
 	}
 
 	s.exec("UPDATE target_checks SET last_checked_at=? WHERE target_id=?", iso(fromSeconds(nowSeconds())), targetID)
-	s.refreshProbeTargets()
+	s.transaction(func() { s.refreshProbeTargets(nowSeconds()) })
 	s.exec("UPDATE replacement_bindings SET blocked_since=? WHERE target_id=?", nowSeconds()-replacementDelay.Seconds()-1, targetID)
-	s.refreshProbeTargets()
+	s.transaction(func() { s.refreshProbeTargets(nowSeconds()) })
 	jobs := s.all("SELECT id,stage FROM replacement_jobs WHERE target_id=?", targetID)
 	if len(jobs) != 1 || jobs[0]["stage"] != "preflight" {
 		t.Fatalf("due blocked target should schedule exactly one preflight job: %#v", jobs)

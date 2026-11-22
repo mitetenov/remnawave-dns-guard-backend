@@ -77,7 +77,7 @@ func (r *Reconciler) syncRemnawavePool(poolID string) {
 			return
 		}
 		targets := s.all("SELECT * FROM targets WHERE pool_id=?", poolID)
-		view := s.probeSnapshot()
+		view := s.poolProbeView(pool, probeSummaryColumns)
 		summaries := map[string]probeSummary{}
 		for _, target := range targets {
 			summaries[str(target["id"])] = view.summary(target)

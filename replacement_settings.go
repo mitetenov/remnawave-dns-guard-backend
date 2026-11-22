@@ -1,6 +1,7 @@
 package guard
 
 import (
+	"context"
 	"net/http"
 	"slices"
 	"strings"
@@ -64,18 +65,32 @@ func (s *Store) reservedReplacementIP(ip string) bool {
 	return s.one("SELECT id FROM replacement_jobs WHERE (old_ip=? OR new_ip=?) AND "+replacementActive, ip, ip) != nil || s.one("SELECT id FROM server_orders WHERE ip=? AND "+orderActive, ip) != nil
 }
 
+func (a *App) providerReadiness(ctx context.Context) row {
+	readyErr := a.replacements.ansible.Ready()
+	orderErr := a.orders.installer.checkOrderConfiguration(ctx)
+	message, orderMessage := "", ""
+	if readyErr != nil {
+		message = readyErr.Error()
+	}
+	if orderErr != nil {
+		orderMessage = orderErr.Error()
+	}
+	a.s.mu.Lock()
+	defer a.s.mu.Unlock()
+	return row{
+		"upcloud_configured": a.s.get("upcloud_token") != "",
+		"virtua_configured":  a.s.get("virtua_token") != "",
+		"ansible_ready":      readyErr == nil, "ansible_error": message,
+		"order_ansible_ready": orderErr == nil, "order_ansible_error": orderMessage,
+	}
+}
+
 func (a *App) replacementRoutes() {
+	a.route("GET /api/settings/providers", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		return a.providerReadiness(r.Context())
+	})
 	a.route("GET /api/replacements", "ui", func(w http.ResponseWriter, r *http.Request) any {
-		readyErr := a.replacements.ansible.Ready()
-		message := ""
-		if readyErr != nil {
-			message = readyErr.Error()
-		}
-		orderErr := a.orders.installer.checkOrderConfiguration(r.Context())
-		orderMessage := ""
-		if orderErr != nil {
-			orderMessage = orderErr.Error()
-		}
+		readiness := a.providerReadiness(r.Context())
 		return a.withStore(func() any {
 			targets := a.s.all(`SELECT t.id,t.name,t.ip,p.name AS pool_name,p.automation_enabled AS pool_enabled,
  t.manual_enabled,COALESCE(b.node_uuid,t.remnawave_uuid) AS remnawave_uuid,
@@ -105,11 +120,8 @@ func (a *App) replacementRoutes() {
 					delete(job, "release_after")
 				}
 			}
-			return row{
-				"upcloud_configured": a.s.get("upcloud_token") != "", "ansible_ready": readyErr == nil, "ansible_error": message,
-				"virtua_configured":   a.s.get("virtua_token") != "",
-				"order_ansible_ready": orderErr == nil, "order_ansible_error": orderMessage, "targets": targets, "jobs": jobs,
-			}
+			readiness["targets"], readiness["jobs"] = targets, jobs
+			return readiness
 		})
 	})
 	a.route("POST /api/replacements/jobs/{id}/retry-create", "ui", func(w http.ResponseWriter, r *http.Request) any {
