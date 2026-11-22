@@ -205,9 +205,31 @@ become = true
 	if checkOnly {
 		return nil
 	}
+	var diagnostics *orderPlaybookDiagnostics
+	if order != nil {
+		diagnostics = &orderPlaybookDiagnostics{alias: alias}
+		env = append(env,
+			"ANSIBLE_STDOUT_CALLBACK=default", "ANSIBLE_DISPLAY_FAILED_STDERR=False", "ANSIBLE_FORCE_COLOR=False",
+			"ANSIBLE_CALLBACK_RESULT_FORMAT=json", "ANSIBLE_CALLBACK_FORMAT_PRETTY=False",
+			"ANSIBLE_DISPLAY_OK_HOSTS=False", "ANSIBLE_DISPLAY_SKIPPED_HOSTS=False",
+		)
+		if a.repoDir == bundledReplacementAnsibleDir {
+			diagnostics.bundled = true
+			args = append(args, "-vv")
+		}
+	}
 	cmd = replacementCommand(ctx, "ansible-playbook", append(args, "--", playPath)...)
 	cmd.Dir, cmd.Env = a.repoDir, env
-	return runReplacementAnsibleCommand(ctx, cmd, playbook+" playbook")
+	if diagnostics != nil {
+		cmd.Stdout = diagnostics
+	}
+	err = runReplacementAnsibleCommand(ctx, cmd, playbook+" playbook")
+	if err != nil && diagnostics != nil && ctx.Err() == nil && cmd.ProcessState != nil {
+		if detail := diagnostics.detail(cmd.ProcessState.ExitCode()); detail != "" {
+			return fmt.Errorf("%w: %s", err, detail)
+		}
+	}
+	return err
 }
 
 func (a *replacementAnsible) loadRepositoryHost(ctx context.Context, env []string, alias, source, varsBase string) (string, map[string]json.RawMessage, error) {
