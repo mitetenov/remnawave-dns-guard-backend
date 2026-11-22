@@ -25,6 +25,7 @@ type fakeReplacementUpCloud struct {
 	next        upCloudServer
 	addr        upCloudIP
 	owner       string
+	zonePublic  string
 	createError string
 	hideLabel   bool
 	loseCleanup bool
@@ -55,7 +56,7 @@ func newFakeReplacementUpCloud(t *testing.T) (*fakeReplacementUpCloud, replaceme
 		]}},
 		"storage_devices":{"storage_device":[{"address":"virtio:0","type":"disk","boot_disk":"1"}]}
 	}`
-	fake := &fakeReplacementUpCloud{t: t, owner: testUpCloudOldServer}
+	fake := &fakeReplacementUpCloud{t: t, owner: testUpCloudOldServer, zonePublic: "yes"}
 	if err := json.Unmarshal([]byte(details), &fake.old); err != nil {
 		t.Fatal(err)
 	}
@@ -93,6 +94,8 @@ func (f *fakeReplacementUpCloud) request(req *http.Request) (*http.Response, err
 		return response(row{"server": f.old}, 200), nil
 	case "GET /server/" + testUpCloudNewServer:
 		return response(row{"server": f.next}, 200), nil
+	case "GET /zone":
+		return response(row{"zones": row{"zone": []row{{"id": "fi-hel1", "public": f.zonePublic}}}}, 200), nil
 	case "GET /server/" + testUpCloudOldServer + "/firewall_rule":
 		return response(row{"firewall_rules": row{"firewall_rule": f.oldFirewall}}, 200), nil
 	case "GET /server/" + testUpCloudNewServer + "/firewall_rule":
@@ -186,7 +189,7 @@ func (f *fakeReplacementUpCloud) request(req *http.Request) (*http.Response, err
 			f.t.Fatal(err)
 		}
 		settings := body.Server
-		if settings.upCloudConfig != f.old.upCloudConfig || settings.PasswordDelivery != "none" ||
+		if settings.upCloudConfig != f.old.upCloudConfig || settings.Host != "" || settings.PasswordDelivery != "none" ||
 			!settings.hasLabel(upCloudReplacementLabel, testUpCloudOperation) || !settings.hasLabel("env", "prod") ||
 			len(settings.Disks.Items) != 1 || settings.Disks.Items[0].ID != testUpCloudDisk ||
 			settings.Disks.Items[0].Action != "attach" || settings.Disks.Items[0].BootDisk != "1" ||
@@ -248,6 +251,7 @@ func retireFakeUpCloud(t *testing.T, provider replacementProvider) json.RawMessa
 
 func TestUpCloudReplacementRecoversLostCreateAndCleanupResponses(t *testing.T) {
 	fake, provider := newFakeReplacementUpCloud(t)
+	fake.old.Host, fake.next.Host = "8055964291", "8055964292"
 	fake.createError = "lost-after"
 	fake.loseCleanup = true
 	snap := retireFakeUpCloud(t, provider)
@@ -361,6 +365,41 @@ func TestUpCloudReplacementRefusesCustomFirewallAndAncillaryAddress(t *testing.T
 			}
 			if _, err := provider.Snapshot(context.Background(), testUpCloudOldServer, testUpCloudOldIP, testUpCloudOperation); err == nil {
 				t.Fatal("snapshot accepted an unsupported layout")
+			}
+			for _, call := range fake.calls {
+				if !strings.HasPrefix(call, "GET ") {
+					t.Fatalf("unsupported source mutated with %s", call)
+				}
+			}
+		})
+	}
+}
+
+func TestUpCloudReplacementSnapshotExplainsUnsupportedSettings(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*fakeReplacementUpCloud)
+		want  string
+	}{
+		{"private cloud host", func(f *fakeReplacementUpCloud) {
+			f.old.Host, f.zonePublic = "8055964291", "no"
+		}, "private cloud host placement (host)"},
+		{"unverified host", func(f *fakeReplacementUpCloud) {
+			f.old.Host, f.old.Zone = "8055964291", "unknown-zone"
+		}, "could not verify public zone"},
+		{"remote console", func(f *fakeReplacementUpCloud) {
+			f.old.RemoteAccessEnabled = "yes"
+		}, "remote_access_enabled"},
+		{"private firewall", func(f *fakeReplacementUpCloud) {
+			f.old.FirewallPrivate = "on"
+		}, "firewall_private"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake, provider := newFakeReplacementUpCloud(t)
+			test.setup(fake)
+			if _, err := provider.Snapshot(context.Background(), testUpCloudOldServer, testUpCloudOldIP, testUpCloudOperation); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("snapshot error = %v, want %q", err, test.want)
 			}
 			for _, call := range fake.calls {
 				if !strings.HasPrefix(call, "GET ") {

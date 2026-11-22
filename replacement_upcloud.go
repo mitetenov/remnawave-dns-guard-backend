@@ -258,17 +258,32 @@ func (s upCloudServer) networkSpecs() ([]upCloudNICSpec, upCloudInterface, error
 	return specs, publicV4, nil
 }
 
-func (s upCloudServer) createSpec(operationID string) (upCloudSnapshot, error) {
+func (c *upCloudReplacement) createSpec(ctx context.Context, s upCloudServer, operationID string) (upCloudSnapshot, error) {
 	cores, _ := s.CoreNumber.Int64()
 	memory, _ := s.MemoryAmount.Int64()
 	if s.Hostname == "" || s.Zone == "" || s.Plan == "" || cores <= 0 || memory <= 0 {
 		return upCloudSnapshot{}, errors.New("UpCloud server details are missing required settings")
 	}
-	if !oneOf(s.BootOrder, "disk", "disk,cdrom", "disk,cdrom,network") || !oneOf(s.Firewall, "on", "off") ||
-		!oneOf(s.RemoteAccessEnabled, "", "no") || !oneOf(s.FirewallPrivate, "", "off") ||
-		!oneOf(s.Host.String(), "", "0") || !oneOf(s.License.String(), "", "0") ||
-		len(s.Tags) != 0 || len(s.Devices.Items) != 0 || strings.HasPrefix(strings.ToUpper(s.Plan), "GPU") {
-		return upCloudSnapshot{}, errors.New("UpCloud server has settings this replacement cannot preserve")
+	switch {
+	case !oneOf(s.BootOrder, "disk", "disk,cdrom", "disk,cdrom,network"):
+		return upCloudSnapshot{}, errors.New("UpCloud server has an unsupported boot order (boot_order)")
+	case !oneOf(s.Firewall, "on", "off"):
+		return upCloudSnapshot{}, errors.New("UpCloud server has an unsupported public firewall setting (firewall)")
+	case !oneOf(s.RemoteAccessEnabled, "", "no"):
+		return upCloudSnapshot{}, errors.New("UpCloud replacement cannot preserve remote console access (remote_access_enabled)")
+	case !oneOf(s.FirewallPrivate, "", "off"):
+		return upCloudSnapshot{}, errors.New("UpCloud replacement cannot preserve the private firewall (firewall_private)")
+	case !oneOf(s.License.String(), "", "0"):
+		return upCloudSnapshot{}, errors.New("UpCloud replacement cannot preserve the server license (license)")
+	case len(s.Tags) != 0:
+		return upCloudSnapshot{}, errors.New("UpCloud replacement cannot preserve server tags (tags)")
+	case len(s.Devices.Items) != 0:
+		return upCloudSnapshot{}, errors.New("UpCloud replacement cannot preserve attached devices (devices)")
+	case strings.HasPrefix(strings.ToUpper(s.Plan), "GPU"):
+		return upCloudSnapshot{}, errors.New("UpCloud replacement does not support GPU plans (plan)")
+	}
+	if err := c.checkHostPlacement(ctx, s); err != nil {
+		return upCloudSnapshot{}, err
 	}
 	nics, publicV4, err := s.networkSpecs()
 	if err != nil {
@@ -317,6 +332,54 @@ func (s upCloudServer) createSpec(operationID string) (upCloudSnapshot, error) {
 	ip := publicV4.IPs.Items[0]
 	ip.MAC = publicV4.MAC
 	return upCloudSnapshot{ServerID: s.ID, OperationID: operationID, OldIP: ip, Config: config, Disks: disks, Labels: labels, NICs: nics}, nil
+}
+
+type upCloudZone struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Public      string `json:"public"`
+}
+
+func (c *upCloudReplacement) zones(ctx context.Context) ([]upCloudZone, error) {
+	var reply struct {
+		Zones *struct {
+			Items []upCloudZone `json:"zone"`
+		} `json:"zones"`
+	}
+	if err := c.request(ctx, http.MethodGet, "/zone", nil, &reply); err != nil {
+		return nil, err
+	}
+	if reply.Zones == nil {
+		return nil, errors.New("UpCloud returned an invalid zone list")
+	}
+	return reply.Zones.Items, nil
+}
+
+func (c *upCloudReplacement) checkHostPlacement(ctx context.Context, server upCloudServer) error {
+	if oneOf(server.Host.String(), "", "0") {
+		return nil
+	}
+	if host, err := server.Host.Int64(); err != nil || host <= 0 {
+		return errors.New("UpCloud server has an invalid host ID (host)")
+	}
+	// UpCloud can report the current compute host in server details. Only
+	// private cloud zones allow selecting a specific host when creating a VM.
+	zones, err := c.zones(ctx)
+	if err != nil {
+		return fmt.Errorf("verify UpCloud host placement (host): %w", err)
+	}
+	for _, zone := range zones {
+		if zone.ID != server.Zone {
+			continue
+		}
+		switch zone.Public {
+		case "yes":
+			return nil
+		case "no":
+			return errors.New("UpCloud replacement cannot preserve private cloud host placement (host)")
+		}
+	}
+	return errors.New("UpCloud could not verify public zone for the reported host (host)")
 }
 
 func (c *upCloudReplacement) server(ctx context.Context, id string) (upCloudServer, error) {
@@ -500,7 +563,7 @@ func (c *upCloudReplacement) Snapshot(ctx context.Context, serverID, oldIP, oper
 	if !oneOf(server.State, "started", "stopped") {
 		return nil, errors.New("UpCloud server must be running or stopped before replacement")
 	}
-	snap, err := server.createSpec(operationID)
+	snap, err := c.createSpec(ctx, server, operationID)
 	if err != nil {
 		return nil, err
 	}
@@ -590,7 +653,7 @@ func (c *upCloudReplacement) Retire(ctx context.Context, serverID, oldIP string,
 	if !oneOf(server.State, "started", "stopped") {
 		return errors.New("the original UpCloud server is in an unexpected state; check its status in UpCloud")
 	}
-	actual, err := server.createSpec(snap.OperationID)
+	actual, err := c.createSpec(ctx, server, snap.OperationID)
 	if err != nil {
 		return err
 	}
@@ -722,7 +785,7 @@ func (c *upCloudReplacement) verifyReplacement(ctx context.Context, snap upCloud
 	if server.State != "started" {
 		return "", fmt.Errorf("UpCloud replacement %s is not running yet; check its status in UpCloud", id)
 	}
-	actual, err := server.createSpec(snap.OperationID)
+	actual, err := c.createSpec(ctx, server, snap.OperationID)
 	if err != nil {
 		return "", err
 	}
