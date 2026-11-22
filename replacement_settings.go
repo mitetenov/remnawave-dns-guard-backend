@@ -259,12 +259,14 @@ func (a *App) replacementRoutes() {
 func (s *Store) replacementDomainUsed(targetID any, domain string) bool {
 	return s.one(`SELECT 1 FROM pools WHERE hostname=?
  UNION ALL SELECT 1 FROM server_orders WHERE domain=?
- UNION ALL SELECT 1 FROM replacement_bindings WHERE virtua_domain=? AND target_id!=? LIMIT 1`, domain, domain, domain, targetID) != nil
+ UNION ALL SELECT 1 FROM server_order_auto_hosts WHERE hostname=?
+ UNION ALL SELECT 1 FROM replacement_bindings WHERE virtua_domain=? AND target_id!=? LIMIT 1`, domain, domain, domain, domain, targetID) != nil
 }
 
 func (s *Store) nodeDomainReserved(domain string) bool {
 	return s.one(`SELECT 1 FROM server_orders WHERE domain=?
- UNION ALL SELECT 1 FROM replacement_bindings WHERE virtua_domain=? LIMIT 1`, domain, domain) != nil
+ UNION ALL SELECT 1 FROM server_order_auto_hosts WHERE hostname=?
+ UNION ALL SELECT 1 FROM replacement_bindings WHERE virtua_domain=? LIMIT 1`, domain, domain, domain) != nil
 }
 
 func (s *Store) setReplacementStage(job row, stage string) {

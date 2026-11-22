@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"slices"
 	"time"
 )
 
@@ -117,7 +118,20 @@ func (m *orderManager) preflight(j row) error {
 	if err = panel.checkOrderHosts(ctx, str(j["pool_hostname"]), ids); err != nil {
 		return err
 	}
-	if m.a.config.OrderAutoHostTag != "" {
+	if host := m.autoHost(j["id"]); host != nil {
+		if !slices.Contains(ids, str(host["inbound_id"])) {
+			return errors.New("в заказе отсутствует inbound постоянного автохоста")
+		}
+		if err = panel.verifyOrderAutoHost(ctx, host); err != nil {
+			return err
+		}
+		if err = dns.checkOrderOriginZone(str(host["hostname"]), str(host["zone_id"])); err != nil {
+			return err
+		}
+		if _, err = dns.orderAutoHostRecord(str(host["zone_id"]), str(host["hostname"]), str(host["host_uuid"])); err != nil {
+			return err
+		}
+	} else if m.a.config.OrderAutoHostTag != "" {
 		if err = panel.checkTaggedOrderHost(ctx, j, ids); err != nil {
 			return err
 		}
@@ -345,7 +359,21 @@ func (m *orderManager) finish(j row) error {
 		return err
 	}
 	var autoHostID string
-	if tag := a.config.OrderAutoHostTag; tag != "" {
+	if host := m.autoHost(j["id"]); host != nil {
+		if err = p.verifyOrderAutoHost(m.ctx, host); err != nil {
+			return err
+		}
+		dns, err := a.dnsProvider()
+		if err != nil {
+			return err
+		}
+		if _, err = dns.checkOrderOrigin(j, "", str(j["ip"]), false); err != nil {
+			return err
+		}
+		if err = dns.pointOrderAutoHost(host, j); err != nil {
+			return err
+		}
+	} else if tag := a.config.OrderAutoHostTag; tag != "" {
 		dns, err := a.dnsProvider()
 		if err != nil {
 			return err
@@ -366,6 +394,12 @@ func (m *orderManager) finish(j row) error {
 		s.event("info", "system", "Сервер "+orderProviderName(str(j["provider"]))+" развёрнут и включён в пул", j["pool_id"], j["target_id"])
 	})
 	return nil
+}
+
+func (m *orderManager) autoHost(orderID any) row {
+	return m.a.withStore(func() any {
+		return m.a.s.one("SELECT * FROM server_order_auto_hosts WHERE order_id=?", orderID)
+	}).(row)
 }
 
 func (s *Store) orderForPool(pool any) bool {

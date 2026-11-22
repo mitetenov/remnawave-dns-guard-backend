@@ -23,6 +23,8 @@ func TestOrderVerificationRetriesOnceAfterConfirmedTimeout(t *testing.T) {
  profile_id,profile_name,inbounds,serial,alias,domain,created_at,updated_at,stage,server_uuid,node_uuid,ip,create_attempted)
  VALUES(?,?,'hash','pool','vpn.example.com','zone',120,'de-fra1','DE','plan','quote','nodes','profile','name','[]',1,'de-01',?,'time','time','target',?,?,?,1)`,
 		orderOriginID, orderOriginID, orderOriginDNS, orderPanelID, orderPanelNode, orderOriginOld)
+	s.exec(`INSERT INTO server_order_auto_hosts(country,slot,pool_id,hostname,zone_id,source_uuid,host_uuid,profile_id,inbound_id,port,order_id)
+ VALUES('DE',1,'pool','auto.example.com','zone','source',?,'profile','inbound',443,?)`, orderPanelID, orderOriginID)
 	order := func() row { return s.one("SELECT * FROM server_orders WHERE id=?", orderOriginID) }
 	started := nowSeconds()
 	if err := m.enrollTarget(order()); err != nil || num(order()["verify_deadline"]) < started+orderVerifyTimeout.Seconds() {
@@ -61,13 +63,13 @@ func TestOrderVerificationRetriesOnceAfterConfirmedTimeout(t *testing.T) {
 	}
 	m.finishOrderDeletionStep(order(), orderDeleteDNS)
 	m.finishOrderDeletionStep(order(), orderDeleteRemnawave)
-	if order()["stage"] != "deleting" || orderOperationID(order()) != orderOriginID {
-		t.Fatal("must wait for hosting deletion", order())
+	if order()["stage"] != "deleting" || orderOperationID(order()) != orderOriginID || m.autoHost(orderOriginID) == nil {
+		t.Fatal("must wait for hosting deletion and keep the auto-host slot", order())
 	}
 	m.finishOrderDeletionStep(order(), orderDeleteHosting)
 	retry := order()
 	if retry["stage"] != "preflight" || orderOperationID(retry) == orderOriginID || retry["ip"] != nil || retry["target_id"] != nil ||
-		truth(retry["create_attempted"]) || retry["domain"] != orderOriginDNS || retry["quote"] != "quote" {
+		truth(retry["create_attempted"]) || retry["domain"] != orderOriginDNS || retry["quote"] != "quote" || m.autoHost(orderOriginID) == nil {
 		t.Fatal("expected the original order to restart with a new cloud identity", retry)
 	}
 	token := enrollmentToken()
@@ -95,8 +97,8 @@ func TestOrderVerificationRetriesOnceAfterConfirmedTimeout(t *testing.T) {
 	m.finishOrderDeletionStep(order(), orderDeleteDNS)
 	m.finishOrderDeletionStep(order(), orderDeleteRemnawave)
 	m.finishOrderDeletionStep(order(), orderDeleteHosting)
-	if order()["stage"] != "unreachable" || num(order()["deleted_resources"]) != orderDeleteAll {
-		t.Fatal("a second failed VPS must end the order", order())
+	if order()["stage"] != "unreachable" || num(order()["deleted_resources"]) != orderDeleteAll || m.autoHost(orderOriginID) != nil {
+		t.Fatal("a second failed VPS must end the order and release the auto-host slot", order())
 	}
 }
 

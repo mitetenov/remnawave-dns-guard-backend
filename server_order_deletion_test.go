@@ -12,6 +12,7 @@ import (
 func TestDeleteServerOrderProtectsPoolAndResumesAfterLostResponse(t *testing.T) {
 	const (
 		poolDomain = "vpn.example.com"
+		autoDomain = "dns-guard-auto-de-01.vpn.example.com"
 		newServer  = "123e4567-e89b-42d3-a456-426614174099"
 		dnsPath    = "/client/v4/zones/zone/dns_records"
 		serverPath = "/1.3/server/" + newServer
@@ -19,6 +20,7 @@ func TestDeleteServerOrderProtectsPoolAndResumesAfterLostResponse(t *testing.T) 
 	records := map[string]row{
 		"pool-a": {"id": "pool-a", "name": poolDomain, "type": "A", "content": orderOriginNew, "proxied": false},
 		"origin": {"id": "origin", "name": orderOriginDNS, "type": "A", "content": orderOriginNew, "proxied": false, "comment": "dns-guard-order:" + orderOriginID},
+		"alias":  {"id": "alias", "name": autoDomain, "type": "CNAME", "content": orderOriginDNS, "proxied": false, "comment": "dns-guard-auto:" + orderPanelID},
 	}
 	var nodeDeletes, serverDeletes int
 	serverState := "started"
@@ -32,7 +34,7 @@ func TestDeleteServerOrderProtectsPoolAndResumesAfterLostResponse(t *testing.T) 
 				}
 			}
 			return response(row{"success": true, "result": found}, http.StatusOK), nil
-		case "DELETE " + dnsPath + "/pool-a", "DELETE " + dnsPath + "/origin":
+		case "DELETE " + dnsPath + "/pool-a", "DELETE " + dnsPath + "/origin", "DELETE " + dnsPath + "/alias":
 			id := strings.TrimPrefix(req.URL.Path, dnsPath+"/")
 			if records[id] == nil {
 				t.Fatalf("repeated deletion of DNS record %s", id)
@@ -88,6 +90,8 @@ func TestDeleteServerOrderProtectsPoolAndResumesAfterLostResponse(t *testing.T) 
 		orderOriginID, orderOriginID, poolDomain, orderOriginDNS, orderPanelID, orderPanelNode, orderOriginOld)
 	s.exec(`INSERT INTO replacement_jobs (id,target_id,pool_id,name,provider,server_uuid,node_uuid,old_ip,new_server_uuid,new_ip,stage,created_at,updated_at)
  VALUES('replacement','target','pool','node','upcloud',?,?,?, ?,?,'complete','time','time')`, orderPanelID, orderPanelNode, orderOriginOld, newServer, orderOriginNew)
+	s.exec(`INSERT INTO server_order_auto_hosts(country,slot,pool_id,hostname,zone_id,source_uuid,host_uuid,profile_id,inbound_id,port,order_id)
+ VALUES('DE',1,'pool',?,'zone','source',?,'profile','inbound',443,?)`, autoDomain, orderPanelID, orderOriginID)
 	request := func(body string, status int) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodDelete, "/api/server-orders/"+orderOriginID, strings.NewReader(body))
@@ -104,7 +108,7 @@ func TestDeleteServerOrderProtectsPoolAndResumesAfterLostResponse(t *testing.T) 
 	request(`{"hosting":false,"remnawave":false,"dns":false}`, http.StatusUnprocessableEntity)
 	request(all, http.StatusOK)
 	app.orders.runOnce()
-	if len(records) != 2 || order()["stage"] != "complete" || !strings.Contains(str(order()["error"]), "Последняя A-запись") || nodeDeletes != 0 || serverDeletes != 0 {
+	if len(records) != 3 || order()["stage"] != "complete" || !strings.Contains(str(order()["error"]), "Последняя A-запись") || nodeDeletes != 0 || serverDeletes != 0 {
 		t.Fatal("final A record did not prevent deletion", order())
 	}
 
@@ -121,7 +125,7 @@ func TestDeleteServerOrderProtectsPoolAndResumesAfterLostResponse(t *testing.T) 
 	app.orders.runOnce()
 	if order()["stage"] != "complete" || num(order()["deleted_resources"]) != orderDeleteDNS|orderDeleteRemnawave ||
 		nodeDeletes != 1 || serverState != "started" || len(records) != 1 || records["fallback"] == nil ||
-		s.one("SELECT id FROM targets WHERE id='target'") != nil {
+		s.one("SELECT id FROM targets WHERE id='target'") != nil || app.orders.autoHost(orderOriginID) != nil {
 		t.Fatal("unexpected state after partial deletion", order())
 	}
 

@@ -31,7 +31,8 @@ func serverOrderError(err error) {
 func (a *App) orderRoutes() {
 	a.route("GET /api/server-orders", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
-			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,create_attempted,can_retry_create,deleted_resources,retry_operation_id
+			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,create_attempted,can_retry_create,deleted_resources,retry_operation_id,
+ (SELECT hostname FROM server_order_auto_hosts WHERE order_id=server_orders.id) AS auto_hostname
  FROM server_orders WHERE ` + orderActive + ` OR stage='complete' OR id IN (SELECT id FROM server_orders ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC`)
 			for _, j := range jobs {
 				j["can_cancel"] = orderStageCancellable(j)
@@ -43,7 +44,9 @@ func (a *App) orderRoutes() {
 				delete(j, "create_attempted")
 			}
 			pools := a.s.all(`SELECT p.id,p.name,p.hostname,COALESCE(t.domain_template,'') AS domain_template FROM pools p LEFT JOIN server_order_templates t ON p.id=t.pool_id ORDER BY p.name,p.hostname`)
-			return row{"orders": jobs, "pools": pools, "stages": orderStages, "upcloud_configured": a.s.get("upcloud_token") != "", "virtua_configured": a.s.get("virtua_token") != ""}
+			autoHosts := a.s.all(`SELECT country,pool_id,source_uuid,hostname,slot,` + orderAutoHostOccupancy + ` AS occupied
+ FROM server_order_auto_hosts h ORDER BY country,slot`)
+			return row{"orders": jobs, "pools": pools, "stages": orderStages, "upcloud_configured": a.s.get("upcloud_token") != "", "virtua_configured": a.s.get("virtua_token") != "", "auto_hosts": autoHosts}
 		})
 	})
 	a.route("DELETE /api/server-orders/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {
@@ -54,6 +57,23 @@ func (a *App) orderRoutes() {
 			invalid("request")
 		}
 		a.orders.queueDeletion(r.PathValue("id"), selected)
+		return row{"ok": true}
+	})
+	a.route("PUT /api/server-orders/auto-hosts/{country}", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		country := strings.ToUpper(r.PathValue("country"))
+		if !oneOf(country, "DE", "FI") {
+			invalid("country")
+		}
+		var data struct {
+			PoolID   string `json:"pool_id"`
+			SourceID string `json:"source_uuid"`
+		}
+		bodyObject(w, r, &data, []string{"pool_id", "source_uuid"})
+		sourceID, valid := canonicalUUID(data.SourceID)
+		if !valid {
+			invalid("source_uuid")
+		}
+		serverOrderError(a.setupOrderAutoHosts(r.Context(), country, data.PoolID, sourceID))
 		return row{"ok": true}
 	})
 	a.route("GET /api/server-orders/{id}/logs", "ui", func(w http.ResponseWriter, r *http.Request) any {
