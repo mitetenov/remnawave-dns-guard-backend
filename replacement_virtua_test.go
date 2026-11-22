@@ -161,6 +161,56 @@ func TestVirtuaReplacementDeletesOnlyConfirmedOldServer(t *testing.T) {
 	}
 }
 
+func TestVirtuaReplacementChecksAccountInventoryWhenOldServerReturnsForbidden(t *testing.T) {
+	const oldID = "35ef20dd-52e2-4747-bb27-86cefed78f74"
+	const newID = testOrderVM
+	for _, tc := range []struct {
+		name      string
+		ids       []string
+		status    int
+		wantError string
+	}{
+		{name: "old server absent", ids: []string{newID}, status: http.StatusOK},
+		{name: "old server still present", ids: []string{newID, strings.ToUpper(oldID)}, status: http.StatusOK, wantError: "Старый VPS по-прежнему в списке"},
+		{name: "replacement server missing", ids: []string{}, status: http.StatusOK, wantError: "Новый VPS отсутствует в списке"},
+		{name: "invalid inventory entry", ids: []string{newID, ""}, status: http.StatusOK, wantError: "некорректный UUID"},
+		{name: "inventory missing", status: http.StatusOK, wantError: "Virtua.Cloud не вернул список серверов"},
+		{name: "inventory forbidden", status: http.StatusForbidden, wantError: "GET /v1/cloud-server (HTTP 403)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &virtuaOrder{client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /v1/cloud-server/" + oldID:
+					return response(row{"success": false}, http.StatusForbidden), nil
+				case "GET /v1/cloud-server":
+					body := row{"success": tc.status == http.StatusOK}
+					if tc.ids != nil {
+						servers := make([]row, 0, len(tc.ids))
+						for _, id := range tc.ids {
+							servers = append(servers, row{"uuid": id})
+						}
+						body["cloud_servers"] = servers
+					}
+					return response(body, tc.status), nil
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+					return nil, nil
+				}
+			})}}
+			err := c.retireReplacementServer(t.Context(), oldID, orderOriginOld, newID)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("expected %q, got %v", tc.wantError, err)
+			}
+		})
+	}
+}
+
 func TestVirtuaReplacementCleanupWaitsForBothDNSChangesAndTTL(t *testing.T) {
 	const targetID = "target"
 	const poolDomain = "vpn.example.com"
