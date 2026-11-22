@@ -111,8 +111,10 @@ func (m *orderManager) deleteOrderDNS(j row) error {
 	a.reconciler.dnsMu.Lock()
 	defer a.reconciler.dnsMu.Unlock()
 	pool := row{"hostname": j["pool_hostname"], "zone_id": j["zone_id"]}
+	var host row
 	var conflict bool
 	a.withStore(func() any {
+		host = s.one("SELECT * FROM server_order_auto_hosts WHERE order_id=?", j["id"])
 		target := s.one("SELECT * FROM targets WHERE id=?", j["target_id"])
 		conflict = target != nil && (target["ip"] != j["ip"] || target["pool_id"] != j["pool_id"] || target["dns_action"] == "replace_ip")
 		conflict = conflict || s.one(`SELECT t.id FROM targets t JOIN pools p ON p.id=t.pool_id
@@ -127,7 +129,7 @@ func (m *orderManager) deleteOrderDNS(j row) error {
 	if err != nil {
 		return err
 	}
-	err = dns.removeOrderDNS(j, pool)
+	err = dns.removeOrderDNS(j, pool, host)
 	var integrationErr *IntegrationError
 	if errors.As(err, &integrationErr) && integrationErr.Kind == "last_record" {
 		if truth(j["delete_unreachable"]) {
@@ -166,9 +168,10 @@ func (m *orderManager) finishOrderDeletionStep(j row, done int) {
 		case orderDeleteDNS:
 			s.exec("DELETE FROM targets WHERE id=?", j["target_id"])
 			s.exec("UPDATE pools SET dns_next_check=0,remnawave_next_check=0 WHERE id=?", j["pool_id"])
-			source := "manual"
-			if truth(j["delete_unreachable"]) {
-				source = "system"
+			source := "system"
+			if !truth(j["delete_unreachable"]) {
+				s.exec("UPDATE server_order_auto_hosts SET order_id=NULL WHERE order_id=?", j["id"])
+				source = "manual"
 			}
 			s.event("warning", source, "Сервер удалён из DNS и DNS Guard", j["pool_id"], j["target_id"])
 		case orderDeleteHosting, orderDeleteRemnawave:
@@ -188,14 +191,19 @@ func (m *orderManager) finishUnreachableOrder(j row) {
  auto_host_uuid=NULL,next_retry=0,error=NULL,updated_at=? WHERE id=? AND stage='deleting' AND delete_unreachable=1`, uid(), iso(time.Now()), j["id"])
 			return nil
 		}
-		s.exec(`UPDATE server_orders SET stage='unreachable',delete_pending=0,delete_unreachable=0,deleted_resources=?,host_key=NULL,
+		s.transaction(func() {
+			res := s.exec(`UPDATE server_orders SET stage='unreachable',delete_pending=0,delete_unreachable=0,deleted_resources=?,host_key=NULL,
  next_retry=0,error=?,updated_at=? WHERE id=? AND stage='deleting' AND delete_unreachable=1`, orderDeleteAll,
-			"Повторный сервер также не прошёл проверку доступности и был удалён. Автоматические попытки завершены.", iso(time.Now()), j["id"])
+				"Повторный сервер также не прошёл проверку доступности и был удалён. Автоматические попытки завершены.", iso(time.Now()), j["id"])
+			if n, _ := res.RowsAffected(); n == 1 {
+				s.exec("UPDATE server_order_auto_hosts SET order_id=NULL WHERE order_id=?", j["id"])
+			}
+		})
 		return nil
 	})
 }
 
-func (c *Cloudflare) removeOrderDNS(j, pool row) error {
+func (c *Cloudflare) removeOrderDNS(j, pool, host row) error {
 	orderID, valid := canonicalUUID(str(j["id"]))
 	domain, ip, zone := str(j["domain"]), str(j["ip"]), str(j["zone_id"])
 	if !valid || !publicIPv4(ip) || !validHost(domain) || !validHost(str(pool["hostname"])) || domain == pool["hostname"] || zone == "" {
@@ -208,8 +216,20 @@ func (c *Cloudflare) removeOrderDNS(j, pool row) error {
 	if origin != nil && origin["content"] != ip {
 		return integration("A-запись домена сервера указывает на другой IP")
 	}
+	var alias row
+	if host != nil {
+		alias, err = c.orderAutoHostRecord(str(host["zone_id"]), str(host["hostname"]), str(host["host_uuid"]))
+		if err != nil {
+			return err
+		}
+	}
 	if _, err = c.ensure(pool, ip, false); err != nil {
 		return err
+	}
+	if alias != nil && orderAutoHostAddress(alias["content"]) == domain {
+		if err = c.deleteDNSRecord(str(host["zone_id"]), str(alias["id"])); err != nil {
+			return err
+		}
 	}
 	if origin != nil {
 		return c.deleteDNSRecord(zone, str(origin["id"]))

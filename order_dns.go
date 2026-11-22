@@ -9,7 +9,14 @@ import (
 
 func (c *Cloudflare) checkOrderOriginZone(domain, zoneID string) error {
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
-	if !validHost(domain) || zoneID == "" {
+	if !validHost(domain) {
+		return integration("The ordered node origin zone configuration is invalid")
+	}
+	return c.checkOrderOriginZones(zoneID, domain)
+}
+
+func (c *Cloudflare) checkOrderOriginZones(zoneID string, domains ...string) error {
+	if zoneID == "" {
 		return integration("The ordered node origin zone configuration is invalid")
 	}
 	zones, err := c.pages("/zones", nil)
@@ -28,14 +35,16 @@ func (c *Cloudflare) checkOrderOriginZone(domain, zoneID string) error {
 			zoneName = strings.ToLower(strings.TrimSuffix(str(zone["name"]), "."))
 		}
 	}
-	if !validHost(zoneName) || !strings.HasSuffix(domain, "."+zoneName) {
-		return integration("The ordered node domain must be a subdomain of the selected Cloudflare zone")
-	}
-	for _, zone := range zones {
-		name := strings.ToLower(strings.TrimSuffix(str(zone["name"]), "."))
-		if len(name) > len(zoneName) && (domain == name || strings.HasSuffix(domain, "."+name)) &&
-			(str(zone["status"]) == "" || zone["status"] == "active") {
-			return integration("The ordered node domain belongs to a more specific Cloudflare zone")
+	for _, domain := range domains {
+		if !validHost(zoneName) || !strings.HasSuffix(domain, "."+zoneName) {
+			return integration("The ordered node domain must be a subdomain of the selected Cloudflare zone")
+		}
+		for _, zone := range zones {
+			name := strings.ToLower(strings.TrimSuffix(str(zone["name"]), "."))
+			if len(name) > len(zoneName) && (domain == name || strings.HasSuffix(domain, "."+name)) &&
+				(str(zone["status"]) == "" || zone["status"] == "active") {
+				return integration("The ordered node domain belongs to a more specific Cloudflare zone")
+			}
 		}
 	}
 	return nil

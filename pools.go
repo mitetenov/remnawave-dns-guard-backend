@@ -80,6 +80,9 @@ func (a *App) poolRoutes() {
 			if (data.Hostname != old["hostname"] || data.ZoneID != old["zone_id"]) && a.s.orderForPool(id) {
 				fail(409, "Дождитесь завершения заказа сервера для этого пула")
 			}
+			if (data.Hostname != old["hostname"] || data.ZoneID != old["zone_id"]) && a.s.one("SELECT 1 FROM server_order_auto_hosts WHERE pool_id=? LIMIT 1", id) != nil {
+				fail(409, "Имя и зона пула используются постоянными автохостами")
+			}
 			if (data.Hostname != old["hostname"] || data.ZoneID != old["zone_id"]) && a.s.one("SELECT id FROM targets WHERE pool_id=?", id) != nil {
 				fail(409, "Hostname and zone cannot change while targets are enrolled")
 			}

@@ -123,6 +123,7 @@ func (s *Store) initializeOrders() {
 	}
 	s.exec("CREATE INDEX IF NOT EXISTS server_orders_target ON server_orders(target_id)")
 	s.exec("CREATE UNIQUE INDEX IF NOT EXISTS server_orders_retry_operation ON server_orders(retry_operation_id) WHERE retry_operation_id IS NOT NULL")
+	s.initializeOrderAutoHosts()
 	s.initializeOrderLogs()
 }
 
@@ -426,6 +427,10 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 	if p == nil {
 		return "", errors.New("настройте шаблон домена и профиль проверок выбранного DNS-пула")
 	}
+	autoHost, err := s.freeOrderAutoHost(sel.PoolID, country, profile.ID)
+	if err != nil {
+		return "", err
+	}
 	serial := int(num(s.one("SELECT MAX(serial) AS n FROM server_orders WHERE country=?", country)["n"])) + 1
 	for {
 		alias := fmt.Sprintf("%s-%02d", strings.ToLower(country), serial)
@@ -438,8 +443,13 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 			continue
 		}
 		id, stamp := uid(), iso(time.Now())
-		s.exec(`INSERT INTO server_orders(id,request_id,selection_hash,pool_id,pool_hostname,zone_id,ttl,zone,country,plan,quote,group_name,profile_id,profile_name,inbounds,serial,alias,domain,created_at,updated_at,provider)
+		s.transaction(func() {
+			s.exec(`INSERT INTO server_orders(id,request_id,selection_hash,pool_id,pool_hostname,zone_id,ttl,zone,country,plan,quote,group_name,profile_id,profile_name,inbounds,serial,alias,domain,created_at,updated_at,provider)
  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, requestID, selectionDigest(sel), sel.PoolID, p["hostname"], p["zone_id"], p["ttl"], sel.Zone, country, plan.Code, sel.Plan, sel.Group, profile.ID, profile.Name, string(encoded), serial, alias, domain, stamp, stamp, sel.Provider)
+			if autoHost != nil {
+				s.exec("UPDATE server_order_auto_hosts SET order_id=? WHERE hostname=?", id, autoHost["hostname"])
+			}
+		})
 		return id, nil
 	}
 }
