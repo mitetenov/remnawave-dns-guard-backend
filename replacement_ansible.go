@@ -124,11 +124,11 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool, vault ansibl
 		}
 		if a.repoDir == bundledReplacementAnsibleDir {
 			if (dir == "" || dir == a.bundledGroupVars()) && vault.variables == "" {
-				return 0, errors.New("Загрузите Vault-файл с токенами Grafana в настройках Ansible")
+				return 0, errors.New("загрузите Vault-файл с токенами Grafana в настройках Ansible")
 			}
 			if vault.variables != "" {
 				if vault.password == "" && a.vaultPasswordFile == "" {
-					return 0, errors.New("Сохраните пароль Ansible Vault в настройках")
+					return 0, errors.New("сохраните пароль Ansible Vault в настройках")
 				}
 				binaries = append(binaries, "ansible-vault")
 			}

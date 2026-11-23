@@ -148,7 +148,7 @@ become = true
 			}
 			enabled, _ := hostVars["common_alloy_enabled"].(json.RawMessage)
 			if string(enabled) != "false" && (hostVars["grafana_cloud_prometheus_token"] == nil || hostVars["grafana_cloud_loki_token"] == nil) {
-				return errors.New("Укажите токены Grafana в настройках Ansible")
+				return errors.New("укажите токены Grafana в настройках Ansible")
 			}
 			if err := validateBundledOrderVars(hostVars, group); err != nil {
 				return err
