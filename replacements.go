@@ -454,6 +454,13 @@ func (w *replacementWorker) changeServer(j row, cloud replacementProvider) error
 			w.a.withStore(func() any { s.exec("UPDATE replacement_jobs SET create_attempted=0 WHERE id=?", j["id"]); return nil })
 		}
 		if err != nil {
+			// UpCloud can confirm the order before the server starts or its IPv4 is ready.
+			if server != "" && server != j["server_uuid"] {
+				w.a.withStore(func() any {
+					s.exec("UPDATE replacement_jobs SET new_server_uuid=? WHERE id=? AND stage='provision' AND new_server_uuid IS NULL", server, j["id"])
+					return nil
+				})
+			}
 			return err
 		}
 		if server == "" || server == j["server_uuid"] || !publicIPv4(ip) || ip == oldIP {

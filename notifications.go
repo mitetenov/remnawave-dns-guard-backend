@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,7 +90,7 @@ func (a *App) notificationRoutes() {
 		var token, chat string
 		a.withStore(func() any { token, chat = a.telegramCredentials(data); return nil })
 		validateTelegram(token, chat)
-		if err := a.notifier.send(r.Context(), token, chat, "DNS Guard · Тестовое уведомление\nTelegram подключён. Сюда будут приходить уведомления об отключении и восстановлении хостов."); err != nil {
+		if err := a.notifier.send(r.Context(), token, chat, "DNS Guard · Тестовое уведомление\nTelegram подключён. Сюда будут приходить уведомления о доступности хостов и этапах автозамены серверов."); err != nil {
 			fail(502, err.Error())
 		}
 		return row{"ok": true, "message": "Тестовое сообщение отправлено в Telegram."}
@@ -122,9 +123,15 @@ func (s *Store) initializeNotifications() {
 			s.exec(`UPDATE notification_target_status SET terminal_status=COALESCE((SELECT ` + notificationSeedSQL + ` FROM notification_target_states v WHERE v.id=target_id),'healthy')`)
 		}
 		s.exec(`INSERT INTO notification_target_status (target_id,status,terminal_status) SELECT v.id,v.status,` + notificationSeedSQL + ` FROM notification_target_states v WHERE true ON CONFLICT(target_id) DO NOTHING`)
+		if !slices.ContainsFunc(s.all("PRAGMA table_info(notification_outbox)"), func(column row) bool { return column["name"] == "replacement_id" }) {
+			s.exec(`ALTER TABLE notification_outbox ADD COLUMN replacement_id TEXT;
+ ALTER TABLE notification_outbox ADD COLUMN provider TEXT;
+ ALTER TABLE notification_outbox ADD COLUMN new_ip TEXT;`)
+		}
 		// Old stale/suspect/startup -> healthy messages are not real recoveries.
-		// Preserve known outage/recovery messages and their delivery retry state.
-		s.exec(`DELETE FROM notification_outbox WHERE COALESCE(status,'') NOT IN ('excluded','disabled','healthy') OR (status='healthy' AND COALESCE(previous_status,'') NOT IN ('excluded','disabled','recovering'))`)
+		// This cleanup applies only to host notifications.
+		s.exec(`DELETE FROM notification_outbox WHERE replacement_id IS NULL AND
+ (COALESCE(status,'') NOT IN ('excluded','disabled','healthy') OR (status='healthy' AND COALESCE(previous_status,'') NOT IN ('excluded','disabled','recovering')))`)
 		s.exec(`CREATE TRIGGER notification_target_insert AFTER INSERT ON targets BEGIN
  INSERT INTO notification_target_status (target_id,status,terminal_status) SELECT v.id,v.status,` + notificationSeedSQL + ` FROM notification_target_states v WHERE v.id=NEW.id;
  END;
@@ -132,6 +139,7 @@ func (s *Store) initializeNotifications() {
  ` + notificationEnqueueSQL + ` AND v.id=NEW.id;
  ` + notificationObserveSQL("v.id=NEW.id") + `;
  END;`)
+		s.exec(notificationReplacementTriggers)
 	})
 }
 
@@ -144,6 +152,24 @@ var notificationEnqueueSQL = `INSERT INTO notification_outbox (target_name,ip,po
  SELECT v.target_name,v.ip,v.pool_name,v.hostname,n.terminal_status,v.status,strftime('%Y-%m-%dT%H:%M:%fZ','now')
  FROM notification_target_states v JOIN notification_target_status n ON n.target_id=v.id
  WHERE ` + notificationEventSQL + ` AND (SELECT enabled FROM notification_control WHERE id=1)=1`
+
+const notificationReplacementTriggers = `CREATE TRIGGER IF NOT EXISTS notification_replacement_start AFTER INSERT ON replacement_jobs
+ WHEN NEW.stage='preflight' AND (SELECT enabled FROM notification_control WHERE id=1)=1 BEGIN
+ INSERT INTO notification_outbox (target_name,ip,pool_name,hostname,status,created_at,replacement_id,provider)
+ SELECT NEW.name,NEW.old_ip,p.name,p.hostname,'replacement_started',NEW.created_at,NEW.id,NEW.provider
+ FROM pools p WHERE p.id=NEW.pool_id;
+ END;
+ CREATE TRIGGER IF NOT EXISTS notification_replacement_progress AFTER UPDATE OF stage,new_server_uuid ON replacement_jobs
+ WHEN (SELECT enabled FROM notification_control WHERE id=1)=1 BEGIN
+ INSERT INTO notification_outbox (target_name,ip,pool_name,hostname,status,created_at,replacement_id,provider,new_ip)
+ SELECT NEW.name,NEW.old_ip,p.name,p.hostname,notice.status,strftime('%Y-%m-%dT%H:%M:%fZ','now'),NEW.id,NEW.provider,NEW.new_ip
+ FROM pools p CROSS JOIN (SELECT CASE
+ WHEN OLD.stage='provision' AND OLD.new_server_uuid IS NULL AND NEW.new_server_uuid IS NOT NULL THEN 'replacement_ordered'
+ WHEN OLD.stage='dns' AND NEW.stage='cleanup' THEN 'replacement_ready'
+ WHEN (NEW.provider='upcloud' AND OLD.stage='retire' AND NEW.stage='provision')
+   OR (NEW.provider='virtua' AND OLD.stage='cleanup' AND NEW.stage='complete') THEN 'replacement_retired'
+ END AS status) notice WHERE p.id=NEW.pool_id AND notice.status IS NOT NULL;
+ END;`
 
 type Notifier struct {
 	s               *Store
@@ -252,6 +278,20 @@ func (n *Notifier) runOnce() {
 }
 
 func notificationMessage(v row) string {
+	if id := str(v["replacement_id"]); id != "" {
+		titles := map[string]string{
+			"replacement_started": "Автозамена запущена",
+			"replacement_ordered": "Новый сервер заказан",
+			"replacement_ready":   "Новый сервер готов и добавлен в DNS-пул",
+			"replacement_retired": "Старый сервер удалён",
+		}
+		message := fmt.Sprintf("DNS Guard · %s\nХост: %s\nПул: %s · %s\nПровайдер: %s\nСтарый IP: %s",
+			titles[str(v["status"])], v["target_name"], v["pool_name"], v["hostname"], orderProviderName(str(v["provider"])), v["ip"])
+		if ip := str(v["new_ip"]); ip != "" {
+			message += "\nНовый IP: " + ip
+		}
+		return fmt.Sprintf("%s\nОперация: %s\nВремя: %s", message, id, v["created_at"])
+	}
 	names := map[string]string{"unknown": "Ожидает проверки", "healthy": "Доступен", "suspect": "Под подозрением", "excluded": "Исключён", "recovering": "Восстанавливается", "disabled": "Отключён вручную", "protected": "Последний A · защищён", "stale": "Нет свежих данных"}
 	return fmt.Sprintf("DNS Guard · Изменение статуса хоста\nХост: %s (%s)\nПул: %s · %s\n%s → %s\nВремя: %s", v["target_name"], v["ip"], v["pool_name"], v["hostname"], names[str(v["previous_status"])], names[str(v["status"])], v["created_at"])
 }
