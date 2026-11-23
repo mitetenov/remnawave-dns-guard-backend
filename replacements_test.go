@@ -3,6 +3,7 @@ package guard
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,9 +17,58 @@ func TestProviderReadinessReturnsOnlyConfigurationStatus(t *testing.T) {
 	response := request(http.MethodGet, "/api/settings/providers")
 	var result row
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil ||
-		len(result) != 6 || !truth(result["upcloud_configured"]) || !truth(result["virtua_configured"]) ||
+		len(result) != 9 || !truth(result["upcloud_configured"]) || !truth(result["virtua_configured"]) ||
 		strings.Contains(response.Body.String(), "token-fixture") {
 		t.Fatalf("unexpected provider readiness response: %d %s", response.Code, response.Body)
+	}
+}
+
+func TestAnsibleSettingsStoreSecretsAndExposeOnlyStatus(t *testing.T) {
+	a, request := panelTestApp(t)
+	const password = "vault-password-fixture"
+	const vaultFile = "$ANSIBLE_VAULT;1.1;AES256\nabcd\n"
+	save := func(body string, authenticated bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/api/settings/providers/ansible", strings.NewReader(body))
+		req.Header.Set("X-Requested-With", "DNSGuard")
+		if authenticated {
+			req.AddCookie(&http.Cookie{Name: "dns_guard_session", Value: "test-session"})
+		}
+		response := httptest.NewRecorder()
+		a.Handler().ServeHTTP(response, req)
+		return response
+	}
+	body, err := json.Marshal(row{"vault_password": password, "vault_file": vaultFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := save(string(body), false); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated update returned %d", response.Code)
+	}
+	if response := save(string(body), true); response.Code != http.StatusOK || strings.Contains(response.Body.String(), password) {
+		t.Fatalf("vault update returned %d", response.Code)
+	}
+	for key, secret := range map[string]string{ansibleVaultPasswordKey: password, ansibleVaultVariablesKey: vaultFile} {
+		ciphertext := str(a.s.one("SELECT value FROM settings WHERE key=?", key)["value"])
+		if ciphertext == "" || strings.Contains(ciphertext, secret) || a.s.get(key) != secret {
+			t.Fatalf("%s was not stored encrypted", key)
+		}
+	}
+	if response := save(`{"vault_password":"new-vault-password","vault_file":"plaintext"}`, true); response.Code != http.StatusUnprocessableEntity || a.s.get(ansibleVaultPasswordKey) != password {
+		t.Fatal("invalid file must not change the password")
+	}
+	if response := save(`{"vault_password":"new-vault-password"}`, true); response.Code != http.StatusOK {
+		t.Fatalf("password-only update returned %d", response.Code)
+	}
+	runner, ok := a.orders.installer.(*replacementAnsible)
+	if !ok || runner.vaultSettings() != (ansibleVaultSettings{password: "new-vault-password", variables: vaultFile}) {
+		t.Fatal("order runner did not receive the saved setting without a restart")
+	}
+	response := request(http.MethodGet, "/api/settings/providers")
+	var status row
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &status) != nil ||
+		!truth(status["ansible_vault_password_configured"]) || !truth(status["ansible_vault_file_configured"]) ||
+		strings.Contains(response.Body.String(), "new-vault-password") || strings.Contains(response.Body.String(), "abcd") {
+		t.Fatal("provider readiness must report only vault configuration status")
 	}
 }
 

@@ -34,7 +34,9 @@ type replacementAnsible struct {
 	orderXHTTPUpstream                string
 	sshUser, sshKey, knownHosts       string
 	sshKeyBase64                      string
+	vaultPasswordFile                 string
 	nodeVarsDir, timeout              string
+	store                             *Store
 }
 
 func newReplacementAnsible() *replacementAnsible {
@@ -55,6 +57,7 @@ func newReplacementAnsible() *replacementAnsible {
 		sshUser:           sshUser,
 		sshKey:            os.Getenv(replacementAnsibleEnv + "SSH_KEY"),
 		sshKeyBase64:      strings.TrimSpace(os.Getenv(replacementLoginKeyEnv)),
+		vaultPasswordFile: os.Getenv(replacementAnsibleEnv + "VAULT_PASSWORD_FILE"),
 		knownHosts:        os.Getenv(replacementAnsibleEnv + "KNOWN_HOSTS"),
 		nodeVarsDir:       os.Getenv(replacementAnsibleEnv + "NODE_VARS_DIR"),
 		timeout:           env(replacementAnsibleEnv+"TIMEOUT", "20m"),
@@ -68,7 +71,9 @@ func newOrderAnsible() *replacementAnsible {
 		a.repoDir = bundledReplacementAnsibleDir
 	}
 	if a.sshKey == "" {
-		a.sshKey = defaultOrderSSHKey
+		if _, err := os.Stat(defaultOrderSSHKey); !errors.Is(err, os.ErrNotExist) {
+			a.sshKey = defaultOrderSSHKey
+		}
 	}
 	a.orderCertbotEmail = strings.TrimSpace(os.Getenv(replacementAnsibleEnv + "CERTBOT_EMAIL"))
 	a.orderXHTTPPath = strings.TrimSpace(os.Getenv(replacementAnsibleEnv + "XHTTP_PATH"))
@@ -77,11 +82,11 @@ func newOrderAnsible() *replacementAnsible {
 }
 
 func (a *replacementAnsible) Ready() error {
-	_, err := a.ready(context.Background(), false)
+	_, err := a.ready(context.Background(), false, a.vaultSettings())
 	return err
 }
 
-func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Duration, error) {
+func (a *replacementAnsible) ready(ctx context.Context, order bool, vault ansibleVaultSettings) (time.Duration, error) {
 	if a == nil || !replacementAnsibleSupported {
 		return 0, errors.New("replacement Ansible runner is unavailable")
 	}
@@ -113,15 +118,30 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Durati
 		files = []requiredFile{{"INSTALL_PLAYBOOK", a.installPlaybook}, {"TUNING_PLAYBOOK", a.tuningPlaybook}}
 	}
 	if order {
-		if _, err := a.orderGroupVars(); err != nil {
+		dir, err := a.orderGroupVars()
+		if err != nil {
 			return 0, err
+		}
+		if a.repoDir == bundledReplacementAnsibleDir {
+			if (dir == "" || dir == a.bundledGroupVars()) && vault.variables == "" {
+				return 0, errors.New("загрузите Vault-файл с токенами Grafana в настройках Ansible")
+			}
+			if vault.variables != "" {
+				if vault.password == "" && a.vaultPasswordFile == "" {
+					return 0, errors.New("сохраните пароль Ansible Vault в настройках")
+				}
+				binaries = append(binaries, "ansible-vault")
+			}
 		}
 	}
 	if !order {
 		files = append(files, requiredFile{"KNOWN_HOSTS", a.knownHosts})
 	}
-	if a.sshKeyBase64 == "" {
+	if a.sshKeyBase64 == "" && !a.useManagedLoginKey() {
 		files = append(files, requiredFile{"SSH_KEY", a.sshKey})
+	}
+	if vault.password == "" && a.vaultPasswordFile != "" {
+		files = append(files, requiredFile{"VAULT_PASSWORD_FILE", a.vaultPasswordFile})
 	}
 	for _, file := range files {
 		info, err := os.Stat(file.path)
@@ -151,8 +171,10 @@ func (a *replacementAnsible) ready(ctx context.Context, order bool) (time.Durati
 			return 0, fmt.Errorf("%s is required for replacement playbooks", binary)
 		}
 	}
-	if _, err := a.readLoginPublicKey(ctx); err != nil {
-		return 0, err
+	if !a.useManagedLoginKey() {
+		if _, err := a.readLoginPublicKey(ctx); err != nil {
+			return 0, err
+		}
 	}
 	return timeout, nil
 }
@@ -244,7 +266,8 @@ func (a *replacementAnsible) Run(ctx context.Context, ip, nodeID string) error {
 }
 
 func (a *replacementAnsible) process(ctx context.Context, ip, nodeID string, checkOnly bool) error {
-	timeout, err := a.ready(ctx, false)
+	vault := a.vaultSettings()
+	timeout, err := a.ready(ctx, false, vault)
 	if err != nil {
 		return err
 	}
@@ -254,11 +277,15 @@ func (a *replacementAnsible) process(ctx context.Context, ip, nodeID string, che
 	if err != nil {
 		return err
 	}
-	work, err := a.createAnsibleWorkspace(knownHosts)
+	work, err := a.createAnsibleWorkspace(ctx, knownHosts)
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(work)
+	a, err = a.withVaultPassword(work, vault.password)
+	if err != nil {
+		return err
+	}
 	if a.repoDir != "" {
 		return a.processRepository(ctx, work, ip, id, nodeVars, nil, checkOnly)
 	}
@@ -305,14 +332,14 @@ func (a *replacementAnsible) process(ctx context.Context, ip, nodeID string, che
 	return a.play(ctx, work, false)
 }
 
-func (a *replacementAnsible) createAnsibleWorkspace(knownHosts string) (string, error) {
+func (a *replacementAnsible) createAnsibleWorkspace(ctx context.Context, knownHosts string) (string, error) {
 	// The /tmp prefix also keeps the generated paths free of characters
 	// interpreted by OpenSSH's option parser.
 	work, err := os.MkdirTemp("/tmp", "dns-guard-replacement-")
 	if err != nil {
 		return "", errors.New("cannot create replacement Ansible workspace")
 	}
-	if err := a.stageLoginKey(filepath.Join(work, "login_key")); err != nil {
+	if err := a.stageLoginKey(ctx, filepath.Join(work, "login_key")); err != nil {
 		_ = os.RemoveAll(work)
 		return "", err
 	}
@@ -337,12 +364,16 @@ func replacementSSHArgs(hostKeys, id string, connectionAttempts int) string {
 	}, " ")
 }
 
-func replacementAnsibleEnvironment(work string) []string {
-	return []string{
+func (a *replacementAnsible) environment(work string) []string {
+	env := []string{
 		"PATH=" + os.Getenv("PATH"), "HOME=" + work, "TMPDIR=" + work, "LC_ALL=C.UTF-8",
 		"ANSIBLE_CONFIG=" + filepath.Join(work, "ansible.cfg"),
 		"ANSIBLE_HOST_KEY_CHECKING=True", "ANSIBLE_RETRY_FILES_ENABLED=False",
 	}
+	if a.vaultPasswordFile != "" {
+		env = append(env, "ANSIBLE_VAULT_PASSWORD_FILE="+a.vaultPasswordFile)
+	}
+	return env
 }
 
 func (a *replacementAnsible) play(ctx context.Context, work string, listHosts bool) error {
@@ -359,7 +390,7 @@ func (a *replacementAnsible) play(ctx context.Context, work string, listHosts bo
 		cmd.Dir = filepath.Dir(play.path)
 		// Give the playbooks only their explicit inputs. Play output can contain
 		// secrets. Only the response to --list-hosts is checked, in memory.
-		cmd.Env = replacementAnsibleEnvironment(work)
+		cmd.Env = a.environment(work)
 		var listed bytes.Buffer
 		if listHosts {
 			cmd.Stdout = &listed

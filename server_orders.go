@@ -140,6 +140,7 @@ func orderOperationID(j row) string {
 func newOrderManager(a *App) *orderManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	installer := newOrderAnsible()
+	installer.store = a.s
 	return &orderManager{a: a, ctx: ctx, cancel: cancel, installer: installer, sshUser: installer.sshUser,
 		cloud: func() (orderCloudProvider, error) {
 			s := a.s
