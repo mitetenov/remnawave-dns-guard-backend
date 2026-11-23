@@ -101,7 +101,7 @@ func replacementDue(since any, now float64) bool {
 	return since != nil && now-num(since) >= replacementDelay.Seconds()
 }
 
-const replacementObservedBindings = `SELECT b.target_id,b.provider,b.server_uuid,b.node_uuid,b.blocked_since,
+const replacementObservedBindings = `SELECT b.target_id,b.provider,b.server_uuid,b.node_uuid,b.blocked_since,b.plugin_uuid,
  EXISTS(SELECT 1 FROM replacement_jobs WHERE target_id=b.target_id AND ` + replacementActive + `) AS active
  FROM replacement_bindings b`
 
@@ -129,8 +129,8 @@ func (s *Store) observeReplacement(t, p, b row, summary probeSummary, now float6
 		return now + delay
 	}
 	stamp := iso(fromSeconds(now))
-	s.exec(`INSERT INTO replacement_jobs(id,target_id,pool_id,name,provider,server_uuid,node_uuid,old_ip,stage,created_at,updated_at)
- VALUES(?,?,?,?,?,?,?,?,'preflight',?,?)`, uid(), t["id"], p["id"], t["name"], b["provider"], b["server_uuid"], b["node_uuid"], t["ip"], stamp, stamp)
+	s.exec(`INSERT INTO replacement_jobs(id,target_id,pool_id,name,provider,server_uuid,node_uuid,old_ip,plugin_uuid,stage,created_at,updated_at)
+ VALUES(?,?,?,?,?,?,?,?,?,'preflight',?,?)`, uid(), t["id"], p["id"], t["name"], b["provider"], b["server_uuid"], b["node_uuid"], t["ip"], str(b["plugin_uuid"]), stamp, stamp)
 	s.event("warning", "system", "Начата проверка перед автозаменой сервера", p["id"], t["id"])
 	return 0
 }
@@ -141,7 +141,7 @@ func (w *replacementWorker) preflightCurrent(j row) bool {
 	s := w.a.s
 	b := s.one("SELECT * FROM replacement_bindings WHERE target_id=?", j["target_id"])
 	t := s.one("SELECT * FROM targets WHERE id=?", j["target_id"])
-	if t == nil || b == nil || !truth(b["enabled"]) || !replacementDue(b["blocked_since"], nowSeconds()) || t["ip"] != j["old_ip"] || b["provider"] != j["provider"] || b["server_uuid"] != j["server_uuid"] || b["node_uuid"] != j["node_uuid"] {
+	if t == nil || b == nil || !truth(b["enabled"]) || !replacementDue(b["blocked_since"], nowSeconds()) || t["ip"] != j["old_ip"] || b["provider"] != j["provider"] || b["server_uuid"] != j["server_uuid"] || b["node_uuid"] != j["node_uuid"] || str(b["plugin_uuid"]) != str(j["plugin_uuid"]) {
 		return false
 	}
 	p := s.one("SELECT id,automation_enabled,interval_seconds,failure_threshold,recovery_threshold FROM pools WHERE id=?", t["pool_id"])
@@ -239,6 +239,9 @@ func (w *replacementWorker) preflight(j row, prepare func() (json.RawMessage, st
 		return err
 	}
 	if err = panel.checkReplacementNode(j, false); err != nil {
+		return err
+	}
+	if _, err = panel.orderPluginName(w.ctx, str(j["plugin_uuid"])); err != nil {
 		return err
 	}
 	if err = panel.replacementHosts(j, false); err != nil {

@@ -27,6 +27,8 @@ func TestVirtuaReplacementRecoversPaidOrderAndPinsNewHostKey(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		ok := func(v row) (*http.Response, error) { v["success"] = true; return response(v, 200), nil }
 		switch r.Method + " " + r.URL.Path {
+		case "GET /api/node-plugins":
+			return response(row{"response": row{"nodePlugins": []row{{"uuid": orderPanelPlugin, "name": "Node filters"}}}}, http.StatusOK), nil
 		case "GET /v1/offers":
 			catalogueReads++
 			return ok(row{"currency": "EUR", "zones": []row{{"code": zone, "country": "FR", "state": "available"}},
@@ -75,11 +77,13 @@ func TestVirtuaReplacementRecoversPaidOrderAndPinsNewHostKey(t *testing.T) {
 	defer app.Close()
 	s, w := app.s, app.replacements
 	s.set("virtua_token", "test-key")
+	s.set("remnawave_url", "https://order-panel.example.com")
+	s.set("remnawave_api_token", "panel-token")
 	s.exec("INSERT INTO pools(id,hostname,zone_id,ttl,automation_enabled) VALUES('pool','vpn.example.com','zone',120,1)")
 	s.exec("INSERT INTO targets(id,pool_id,ip,remnawave_uuid) VALUES('target','pool',?,?)", orderOriginOld, nodeID)
 	s.exec("INSERT INTO sessions(token,username,expires) VALUES(?,'admin',?)", digest("session"), nowSeconds()+300)
 
-	binding, _ := json.Marshal(row{"provider": "virtua", "server_uuid": oldServer, "remnawave_uuid": nodeID, "enabled": true,
+	binding, _ := json.Marshal(row{"provider": "virtua", "server_uuid": oldServer, "remnawave_uuid": nodeID, "enabled": true, "plugin_uuid": orderPanelPlugin,
 		"virtua_zone": zone, "virtua_quote": orderPlanChoice(zone, plan).ID, "virtua_group": "nodes", "virtua_domain": orderOriginDNS})
 	req := httptest.NewRequest(http.MethodPut, "/api/replacements/targets/target", strings.NewReader(string(binding)))
 	req.AddCookie(&http.Cookie{Name: "dns_guard_session", Value: "session"})
@@ -88,6 +92,9 @@ func TestVirtuaReplacementRecoversPaidOrderAndPinsNewHostKey(t *testing.T) {
 	app.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatal("binding could not be saved", rec.Code, rec.Body.String())
+	}
+	if bound := s.one("SELECT plugin_uuid FROM replacement_bindings WHERE target_id='target'"); bound["plugin_uuid"] != orderPanelPlugin {
+		t.Fatal("the selected plugin was not saved with the binding", bound)
 	}
 	s.exec(`INSERT INTO replacement_jobs(id,target_id,pool_id,name,provider,server_uuid,node_uuid,old_ip,stage,snapshot,enroll_digest,created_at,updated_at)
  VALUES(?,'target','pool','Test node','virtua',?,?,?,'provision',?,?,?,?)`, operation, oldServer, nodeID, orderOriginOld, s.cipher.encrypt(snapshot), digest(strings.Repeat("a", 43)), iso(fromSeconds(nowSeconds())), iso(fromSeconds(nowSeconds())))

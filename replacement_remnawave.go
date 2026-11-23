@@ -46,7 +46,7 @@ func (r *Remnawave) checkReplacementNode(job row, update bool) error {
 	if err != nil {
 		return err
 	}
-	found := false
+	var bound row
 	for _, node := range nodes {
 		if !strings.EqualFold(str(node["uuid"]), str(job["node_uuid"])) {
 			if node["address"] == job["old_ip"] || node["address"] == job["new_ip"] || replacementUsesOrigin(job, node["address"]) {
@@ -54,7 +54,7 @@ func (r *Remnawave) checkReplacementNode(job row, update bool) error {
 			}
 			continue
 		}
-		found = true
+		bound = node
 		if replacementUsesOrigin(job, node["address"]) {
 			continue
 		}
@@ -65,30 +65,45 @@ func (r *Remnawave) checkReplacementNode(job row, update bool) error {
 			return errors.New("IPv4 привязанной ноды Remnawave не совпадает с прежним IP цели")
 		}
 	}
-	if !found {
+	if bound == nil {
 		return errors.New("привязанная нода не найдена в Remnawave")
 	}
 	if !update {
 		return nil
 	}
-	for _, node := range nodes {
-		if strings.EqualFold(str(node["uuid"]), str(job["node_uuid"])) && node["address"] != job["new_ip"] && !replacementUsesOrigin(job, node["address"]) {
-			if err = r.patch("nodes", row{"uuid": job["node_uuid"], "address": job["new_ip"]}); err != nil {
-				return err
+	pluginID := str(job["plugin_uuid"])
+	addressMatches := func(node row) bool {
+		return node["address"] == job["new_ip"] || replacementUsesOrigin(job, node["address"])
+	}
+	pluginMatches := func(node row) bool {
+		return pluginID == "" || strings.EqualFold(str(node["active_plugin_uuid"]), pluginID)
+	}
+	patch := row{"uuid": job["node_uuid"]}
+	if !addressMatches(bound) {
+		patch["address"] = job["new_ip"]
+	}
+	if !pluginMatches(bound) {
+		patch["activePluginUuid"] = pluginID
+	}
+	if len(patch) == 1 {
+		return nil
+	}
+	if err = r.patch("nodes", patch); err != nil {
+		return err
+	}
+	nodes, err = r.nodes()
+	if err != nil {
+		return err
+	}
+	for _, current := range nodes {
+		if strings.EqualFold(str(current["uuid"]), str(job["node_uuid"])) && addressMatches(current) {
+			if !pluginMatches(current) {
+				return errors.New("Remnawave ещё не подтвердил плагин ноды")
 			}
-			nodes, err = r.nodes()
-			if err != nil {
-				return err
-			}
-			for _, current := range nodes {
-				if strings.EqualFold(str(current["uuid"]), str(job["node_uuid"])) && current["address"] == job["new_ip"] {
-					return nil
-				}
-			}
-			return errors.New("Remnawave ещё не подтвердил адрес ноды")
+			return nil
 		}
 	}
-	return nil
+	return errors.New("Remnawave ещё не подтвердил адрес ноды")
 }
 
 // Hostnames continue to follow DNS. A host with an explicit IP can be changed

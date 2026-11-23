@@ -32,7 +32,7 @@ func (s *Store) initializeReplacements() {
  WHEN NEW.ip!=OLD.ip OR NEW.manual_enabled!=OLD.manual_enabled OR NEW.last_checked_at IS NULL
  BEGIN UPDATE replacement_bindings SET blocked_since=NULL WHERE target_id=NEW.id; END;`)
 	columns := s.all("PRAGMA table_info(replacement_bindings)")
-	for _, name := range []string{"virtua_zone", "virtua_quote", "virtua_group", "virtua_domain"} {
+	for _, name := range []string{"virtua_zone", "virtua_quote", "virtua_group", "virtua_domain", "plugin_uuid"} {
 		if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == name }) {
 			s.exec("ALTER TABLE replacement_bindings ADD COLUMN " + name + " TEXT NOT NULL DEFAULT ''")
 		}
@@ -42,6 +42,9 @@ func (s *Store) initializeReplacements() {
 		if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == name }) {
 			s.exec("ALTER TABLE replacement_jobs ADD COLUMN " + name + " TEXT")
 		}
+	}
+	if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == "plugin_uuid" }) {
+		s.exec("ALTER TABLE replacement_jobs ADD COLUMN plugin_uuid TEXT NOT NULL DEFAULT ''")
 	}
 	// No probes were observed while the backend was down. Already committed
 	// retirements resume from their saved stage.
@@ -94,7 +97,7 @@ func (a *App) replacementRoutes() {
 		return a.withStore(func() any {
 			targets := a.s.all(`SELECT t.id,t.name,t.ip,p.name AS pool_name,p.automation_enabled AS pool_enabled,
  t.manual_enabled,COALESCE(b.node_uuid,t.remnawave_uuid) AS remnawave_uuid,
- COALESCE(b.provider,o.provider) AS provider,COALESCE(b.server_uuid,o.server_uuid) AS server_uuid,b.enabled,b.blocked_since,
+ COALESCE(b.provider,o.provider) AS provider,COALESCE(b.server_uuid,o.server_uuid) AS server_uuid,b.enabled,b.blocked_since,b.plugin_uuid,
  COALESCE(NULLIF(b.virtua_zone,''),o.zone,'') AS virtua_zone,COALESCE(NULLIF(b.virtua_quote,''),o.quote,'') AS virtua_quote,
  COALESCE(NULLIF(b.virtua_group,''),o.group_name,'') AS virtua_group,COALESCE(NULLIF(b.virtua_domain,''),o.domain,'') AS virtua_domain,
  o.id IS NOT NULL AS order_managed
@@ -161,14 +164,15 @@ func (a *App) replacementRoutes() {
 	})
 	a.route("PUT /api/replacements/targets/{id}", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		var data struct {
-			Provider string `json:"provider"`
-			Server   string `json:"server_uuid"`
-			Node     string `json:"remnawave_uuid"`
-			Enabled  bool   `json:"enabled"`
-			Zone     string `json:"virtua_zone"`
-			Quote    string `json:"virtua_quote"`
-			Group    string `json:"virtua_group"`
-			Domain   string `json:"virtua_domain"`
+			Provider string  `json:"provider"`
+			Server   string  `json:"server_uuid"`
+			Node     string  `json:"remnawave_uuid"`
+			Enabled  bool    `json:"enabled"`
+			Zone     string  `json:"virtua_zone"`
+			Quote    string  `json:"virtua_quote"`
+			Group    string  `json:"virtua_group"`
+			Domain   string  `json:"virtua_domain"`
+			PluginID *string `json:"plugin_uuid"`
 		}
 		bodyObject(w, r, &data, []string{"provider", "server_uuid", "remnawave_uuid", "enabled"})
 		adapter, ok := a.replacements.providers[data.Provider]
@@ -187,6 +191,17 @@ func (a *App) replacementRoutes() {
 		if !ok {
 			invalid("remnawave_uuid")
 		}
+		if data.PluginID != nil && *data.PluginID != "" {
+			pluginID, valid := canonicalUUID(*data.PluginID)
+			if !valid {
+				invalid("plugin_uuid")
+			}
+			panel, err := a.remnawaveProvider()
+			serverOrderError(err)
+			_, err = panel.orderPluginName(r.Context(), pluginID)
+			serverOrderError(err)
+			*data.PluginID = pluginID
+		}
 		id := r.PathValue("id")
 		return a.withStore(func() any {
 			t := a.target(id)
@@ -194,6 +209,10 @@ func (a *App) replacementRoutes() {
 				fail(409, "Дождитесь завершения заказа сервера")
 			}
 			b := a.s.one("SELECT * FROM replacement_bindings WHERE target_id=?", id)
+			pluginID := str(b["plugin_uuid"])
+			if data.PluginID != nil {
+				pluginID = *data.PluginID
+			}
 			order := a.s.one("SELECT * FROM server_orders WHERE target_id=? AND stage='complete'", id)
 			if order != nil && (data.Provider == virtuaOrderProvider || order["provider"] == virtuaOrderProvider) &&
 				(order["provider"] != data.Provider || order["node_uuid"] != node) {
@@ -223,7 +242,8 @@ func (a *App) replacementRoutes() {
 				data.Zone, data.Quote, data.Group, data.Domain = "", "", "", ""
 			}
 			same := b != nil && b["provider"] == data.Provider && b["server_uuid"] == server && b["node_uuid"] == node &&
-				b["virtua_zone"] == data.Zone && b["virtua_quote"] == data.Quote && b["virtua_group"] == data.Group && b["virtua_domain"] == data.Domain
+				b["virtua_zone"] == data.Zone && b["virtua_quote"] == data.Quote && b["virtua_group"] == data.Group && b["virtua_domain"] == data.Domain &&
+				b["plugin_uuid"] == pluginID
 			if same && truth(b["enabled"]) == data.Enabled {
 				return row{"ok": true}
 			}
@@ -244,10 +264,10 @@ func (a *App) replacementRoutes() {
 				if job != nil && job["stage"] == "preflight" {
 					a.s.setReplacementStage(job, "cancelled")
 				}
-				a.s.exec(`INSERT INTO replacement_bindings(target_id,provider,server_uuid,node_uuid,enabled,virtua_zone,virtua_quote,virtua_group,virtua_domain) VALUES(?,?,?,?,?,?,?,?,?)
+				a.s.exec(`INSERT INTO replacement_bindings(target_id,provider,server_uuid,node_uuid,enabled,virtua_zone,virtua_quote,virtua_group,virtua_domain,plugin_uuid) VALUES(?,?,?,?,?,?,?,?,?,?)
  ON CONFLICT(target_id) DO UPDATE SET provider=excluded.provider,server_uuid=excluded.server_uuid,node_uuid=excluded.node_uuid,
  enabled=excluded.enabled,blocked_since=NULL,virtua_zone=excluded.virtua_zone,virtua_quote=excluded.virtua_quote,
- virtua_group=excluded.virtua_group,virtua_domain=excluded.virtua_domain`, id, data.Provider, server, node, data.Enabled, data.Zone, data.Quote, data.Group, data.Domain)
+ virtua_group=excluded.virtua_group,virtua_domain=excluded.virtua_domain,plugin_uuid=excluded.plugin_uuid`, id, data.Provider, server, node, data.Enabled, data.Zone, data.Quote, data.Group, data.Domain, pluginID)
 				a.s.exec("UPDATE targets SET remnawave_uuid=? WHERE id=?", node, id)
 				a.s.event("info", "system", "Настройки автозамены узла изменены", t["pool_id"], id)
 			})

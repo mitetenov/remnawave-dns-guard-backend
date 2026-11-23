@@ -19,6 +19,7 @@ const (
 	orderPanelHost      = "123e4567-e89b-42d3-a456-426614174005"
 	orderPanelEmpty     = "123e4567-e89b-42d3-a456-426614174006"
 	orderPanelOther     = "123e4567-e89b-42d3-a456-426614174007"
+	orderPanelPlugin    = "123e4567-e89b-42d3-a456-426614174008"
 )
 
 func orderPanelClient(t *testing.T, handler roundTripFunc) *Remnawave {
@@ -106,6 +107,32 @@ func TestRemnawaveOrderProfilesReturnOnlySelectableMetadata(t *testing.T) {
 	}
 }
 
+func TestRemnawaveOrderPluginChoices(t *testing.T) {
+	reads := 0
+	panel := orderPanelClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet || req.URL.Path != "/api/node-plugins" {
+			t.Fatal("unexpected request for panel plugin choices")
+		}
+		reads++
+		return response(row{"response": row{"total": 1, "nodePlugins": []row{
+			{"uuid": orderPanelPlugin, "name": "Node filters", "config": row{"configuration": "private"}},
+		}}}, 200), nil
+	})
+	ctx := context.Background()
+	if name, err := panel.orderPluginName(ctx, ""); name != "" || err != nil || reads != 0 {
+		t.Fatal("an optional selection must not require the plugin API", name, err)
+	}
+	if choices, err := panel.orderPlugins(ctx); err != nil || !slices.Equal(choices, []orderChoice{{ID: orderPanelPlugin, Label: "Node filters"}}) {
+		t.Fatal("unexpected plugin choices", choices, err)
+	}
+	if name, err := panel.orderPluginName(ctx, orderPanelPlugin); name != "Node filters" || err != nil {
+		t.Fatal("the selected plugin was not found", name, err)
+	}
+	if _, err := panel.orderPluginName(ctx, orderPanelOther); err == nil {
+		t.Fatal("accepted a missing plugin")
+	}
+}
+
 func TestRemnawaveOrderNodeReadbackAfterLostCreateReply(t *testing.T) {
 	const ip = "8.8.4.4"
 	const name = "fin-new-01"
@@ -122,6 +149,7 @@ func TestRemnawaveOrderNodeReadbackAfterLostCreateReply(t *testing.T) {
 			creates++
 			var body struct {
 				Name, Address, CountryCode, Note string
+				ActivePluginUUID                 string
 				Port                             int
 				ConfigProfile                    struct {
 					ActiveConfigProfileUUID string
@@ -131,13 +159,14 @@ func TestRemnawaveOrderNodeReadbackAfterLostCreateReply(t *testing.T) {
 			if err := json.NewDecoder(req.Body).Decode(&body); err != nil ||
 				body.Name != name || body.Address != ip || body.CountryCode != "FI" || body.Port != 2222 ||
 				body.Note != "dns-guard-order:"+orderPanelID ||
+				body.ActivePluginUUID != orderPanelPlugin ||
 				body.ConfigProfile.ActiveConfigProfileUUID != orderPanelProfileID ||
 				!slices.Equal(body.ConfigProfile.ActiveInbounds, []string{orderPanelInbound}) {
 				t.Fatal("unexpected create request", body, err)
 			}
 			created = append(created, row{
 				"uuid": orderPanelNode, "name": body.Name, "address": body.Address, "port": body.Port, "countryCode": body.CountryCode, "note": body.Note,
-				"configProfile": row{"activeConfigProfileUuid": orderPanelProfileID, "activeInbounds": []row{{"uuid": orderPanelInbound}}},
+				"configProfile": row{"activeConfigProfileUuid": orderPanelProfileID, "activeInbounds": []row{{"uuid": orderPanelInbound}}}, "activePluginUuid": body.ActivePluginUUID,
 			})
 			return nil, errors.New("upstream sent a sensitive error after creating the node")
 		default:
@@ -146,7 +175,7 @@ func TestRemnawaveOrderNodeReadbackAfterLostCreateReply(t *testing.T) {
 		}
 	})
 	for range 2 {
-		id, err := panel.ensureOrderNode(context.Background(), orderPanelID, name, ip, "fi", orderPanelProfileID, []string{orderPanelInbound})
+		id, err := panel.ensureOrderNode(context.Background(), orderPanelID, name, ip, "fi", orderPanelProfileID, []string{orderPanelInbound}, orderPanelPlugin)
 		if id != orderPanelNode || err != nil {
 			t.Fatal(id, err)
 		}
@@ -186,7 +215,7 @@ func TestRemnawaveOrderNodeRefusesConflictingOrChangedNodes(t *testing.T) {
 				}
 				return response(row{"response": nodes}, 200), nil
 			})
-			if id, err := panel.ensureOrderNode(context.Background(), orderPanelID, name, ip, "FI", orderPanelProfileID, []string{orderPanelInbound}); id != "" || err == nil {
+			if id, err := panel.ensureOrderNode(context.Background(), orderPanelID, name, ip, "FI", orderPanelProfileID, []string{orderPanelInbound}, ""); id != "" || err == nil {
 				t.Fatal("accepted conflicting node", id, err)
 			}
 		})
