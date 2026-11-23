@@ -4,13 +4,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 )
 
 const orderAutoHostCount = 10
+const defaultOrderAutoHostTag = "AUTO_CHEAP_NODE"
+
+func (a *App) orderAutoSlotTag() string {
+	if a.config.OrderAutoHostTag != "" {
+		return a.config.OrderAutoHostTag
+	}
+	return defaultOrderAutoHostTag
+}
 
 func (s *Store) initializeOrderAutoHosts() {
 	s.exec(`CREATE TABLE IF NOT EXISTS server_order_auto_hosts (
@@ -132,6 +142,7 @@ func (a *App) setupOrderAutoHosts(ctx context.Context, country, poolID, sourceID
 	type slot struct {
 		hostID  string
 		payload row
+		current row
 	}
 	slots := make([]slot, len(domains))
 	for i, domain := range domains {
@@ -140,42 +151,46 @@ func (a *App) setupOrderAutoHosts(ctx context.Context, country, poolID, sourceID
 		for field, value := range base {
 			payload[field] = value
 		}
-		hostID, err := findOrderAutoHost(hosts, payload)
+		current, err := findOrderAutoHost(hosts, payload)
 		if err != nil {
 			return err
 		}
+		hostID, _ := canonicalUUID(str(current["uuid"]))
 		if len(saved) > 0 && hostID != str(saved[i]["host_uuid"]) {
 			return fmt.Errorf("сохранённый автохост %s отсутствует или был пересоздан в Remnawave", name)
 		}
 		if _, err = dns.orderAutoHostRecord(zoneID, domain, hostID); err != nil {
 			return err
 		}
-		slots[i] = slot{hostID, payload}
+		slots[i] = slot{hostID: hostID, payload: payload, current: current}
 	}
+	tag := a.orderAutoSlotTag()
 	for i := range slots {
 		slot := &slots[i]
-		if slot.hostID != "" {
-			continue
-		}
-		var created row
-		createErr := panel.orderRequest(ctx, http.MethodPost, "hosts", slot.payload, &created)
-		if createErr == nil {
-			slot.hostID, err = findOrderAutoHost([]row{created}, slot.payload)
-		} else {
-			// A request can take effect even when its response is lost.
-			hosts, err = orderRemnawaveList[row](ctx, panel, "hosts")
-			if err == nil {
-				slot.hostID, err = findOrderAutoHost(hosts, slot.payload)
-			}
-		}
-		if err != nil {
-			return err
-		}
 		if slot.hostID == "" {
+			payload := maps.Clone(slot.payload)
+			payload["tags"] = []string{tag}
+			var created row
+			createErr := panel.orderRequest(ctx, http.MethodPost, "hosts", payload, &created)
+			candidates := []row{created}
 			if createErr != nil {
-				return createErr
+				// A request can take effect even when its response is lost.
+				candidates, err = orderRemnawaveList[row](ctx, panel, "hosts")
+				if err != nil {
+					return err
+				}
 			}
-			return integration("Remnawave не подтвердил создание автохоста")
+			slot.current, err = findOrderAutoHost(candidates, slot.payload)
+			if err != nil {
+				return err
+			}
+			slot.hostID, _ = canonicalUUID(str(slot.current["uuid"]))
+			if slot.hostID == "" {
+				return taggedOrderHostError("Remnawave не подтвердил создание автохоста", createErr)
+			}
+		}
+		if err = panel.ensureOrderAutoSlotTag(ctx, slot.hostID, slot.current, tag); err != nil {
+			return err
 		}
 	}
 	if len(saved) == 0 {
@@ -216,25 +231,25 @@ func orderAutoHostPayload(source row, profileID, inboundID string, port float64)
 	return payload
 }
 
-func findOrderAutoHost(hosts []row, expected row) (string, error) {
-	var found string
+func findOrderAutoHost(hosts []row, expected row) (row, error) {
+	var found row
 	for _, h := range hosts {
 		if h["remark"] != expected["remark"] && orderAutoHostAddress(h["address"]) != expected["address"] {
 			continue
 		}
-		id, valid := canonicalUUID(str(h["uuid"]))
-		if found != "" || !valid || orderAutoHostAddress(h["address"]) != expected["address"] || truth(h["overrideSniFromAddress"]) || truth(h["xrayJsonTemplateUuid"]) {
-			return "", fmt.Errorf("конфликт автохоста Remnawave %s", expected["remark"])
+		_, valid := canonicalUUID(str(h["uuid"]))
+		if found != nil || !valid || orderAutoHostAddress(h["address"]) != expected["address"] || truth(h["overrideSniFromAddress"]) || truth(h["xrayJsonTemplateUuid"]) {
+			return nil, fmt.Errorf("конфликт автохоста Remnawave %s", expected["remark"])
 		}
 		for key, value := range expected {
 			if key == "isDisabled" && h[key] == nil {
 				continue // Older panels may omit the false default.
 			}
 			if key != "address" && !reflect.DeepEqual(h[key], value) {
-				return "", fmt.Errorf("параметры автохоста Remnawave %s отличаются от исходного хоста", expected["remark"])
+				return nil, fmt.Errorf("параметры автохоста Remnawave %s отличаются от исходного хоста", expected["remark"])
 			}
 		}
-		found = id
+		found = h
 	}
 	return found, nil
 }
@@ -292,22 +307,44 @@ func (c *Cloudflare) pointOrderAutoHost(host, order row) error {
 	return integration("Cloudflare не подтвердил адрес автохоста")
 }
 
-func (r *Remnawave) verifyOrderAutoHost(ctx context.Context, host row) error {
+func (r *Remnawave) orderAutoHost(ctx context.Context, host row) (row, error) {
 	var current row
 	if err := r.orderRequest(ctx, http.MethodGet, "hosts/"+str(host["host_uuid"]), nil, &current); err != nil {
-		return err
+		return nil, err
 	}
 	expected := row{
 		"remark": orderAutoHostName(str(host["country"]), int(num(host["slot"]))), "address": host["hostname"],
 		"inbound": map[string]any{"configProfileUuid": host["profile_id"], "configProfileInboundUuid": host["inbound_id"]},
 		"port":    num(host["port"]), "isHidden": true, "isDisabled": false,
 	}
-	id, err := findOrderAutoHost([]row{current}, expected)
+	current, err := findOrderAutoHost([]row{current}, expected)
 	if err != nil {
+		return nil, err
+	}
+	id, _ := canonicalUUID(str(current["uuid"]))
+	if id != host["host_uuid"] {
+		return nil, integration("Постоянный автохост не найден в Remnawave")
+	}
+	return current, nil
+}
+
+func (r *Remnawave) ensureOrderAutoSlotTag(ctx context.Context, id string, host row, tag string) error {
+	tags, ok := host["tags"].([]any)
+	if !ok && host["tags"] != nil {
+		return integration("Remnawave вернул некорректные теги автохоста")
+	}
+	if slices.Contains(tags, any(tag)) {
+		return nil
+	}
+	patchErr := r.orderRequest(ctx, http.MethodPatch, "hosts", row{"uuid": id, "tags": append(slices.Clone(tags), tag)}, nil)
+	var current row
+	if err := r.orderRequest(ctx, http.MethodGet, "hosts/"+id, nil, &current); err != nil {
 		return err
 	}
-	if id != host["host_uuid"] {
-		return integration("Постоянный автохост не найден в Remnawave")
+	currentID, _ := canonicalUUID(str(current["uuid"]))
+	updated, _ := current["tags"].([]any)
+	if currentID != id || !slices.Contains(updated, any(tag)) {
+		return taggedOrderHostError("Remnawave не подтвердил сохранение тега автохоста", patchErr)
 	}
 	return nil
 }

@@ -125,7 +125,7 @@ func (m *orderManager) preflight(j row) error {
 		if !slices.Contains(ids, str(host["inbound_id"])) {
 			return errors.New("в заказе отсутствует inbound постоянного автохоста")
 		}
-		if err = panel.verifyOrderAutoHost(ctx, host); err != nil {
+		if _, err = panel.orderAutoHost(ctx, host); err != nil {
 			return err
 		}
 		if err = dns.checkOrderOriginZone(str(host["hostname"]), str(host["zone_id"])); err != nil {
@@ -363,7 +363,8 @@ func (m *orderManager) finish(j row) error {
 	}
 	var autoHostID string
 	if host := m.autoHost(j["id"]); host != nil {
-		if err = p.verifyOrderAutoHost(m.ctx, host); err != nil {
+		current, err := p.orderAutoHost(m.ctx, host)
+		if err != nil {
 			return err
 		}
 		dns, err := a.dnsProvider()
@@ -371,6 +372,9 @@ func (m *orderManager) finish(j row) error {
 			return err
 		}
 		if _, err = dns.checkOrderOrigin(j, "", str(j["ip"]), false); err != nil {
+			return err
+		}
+		if err = p.ensureOrderAutoSlotTag(m.ctx, str(host["host_uuid"]), current, a.orderAutoSlotTag()); err != nil {
 			return err
 		}
 		if err = dns.pointOrderAutoHost(host, j); err != nil {
