@@ -98,6 +98,48 @@ func TestReplacementUpdatesBoundNodeAndDirectHostsOnce(t *testing.T) {
 	}
 }
 
+func TestReplacementAssignsPluginToNodeWithStableDomain(t *testing.T) {
+	job := row{
+		"node_uuid": orderPanelNode, "old_ip": "8.8.8.8", "new_ip": "1.1.1.1",
+		"node_domain": "node.example.com",
+	}
+	plugin := orderPanelOther
+	patches := 0
+	panel := orderPanelClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/api/nodes" {
+			t.Fatal("unexpected endpoint", req.URL.Path)
+		}
+		if req.Method == http.MethodPatch {
+			var body row
+			if err := json.NewDecoder(req.Body).Decode(&body); err != nil || len(body) != 2 ||
+				body["uuid"] != orderPanelNode || body["activePluginUuid"] != orderPanelPlugin {
+				t.Fatal("unexpected node patch", body, err)
+			}
+			patches++
+			if patches == 2 {
+				plugin = orderPanelPlugin
+			}
+			return response(row{}, 200), nil
+		}
+		return response(row{"response": []row{{"uuid": orderPanelNode, "name": "Node", "address": job["node_domain"], "activePluginUuid": plugin}}}, 200), nil
+	})
+	if err := panel.checkReplacementNode(job, true); err != nil || patches != 0 {
+		t.Fatal("a replacement without a selection must preserve the active plugin", err)
+	}
+	job["plugin_uuid"] = orderPanelPlugin
+	if err := panel.checkReplacementNode(job, false); err != nil || patches != 0 {
+		t.Fatal("preflight must not change the plugin", err)
+	}
+	if err := panel.checkReplacementNode(job, true); err == nil || patches != 1 {
+		t.Fatal("the worker must wait for plugin confirmation", err)
+	}
+	for range 2 {
+		if err := panel.checkReplacementNode(job, true); err != nil || patches != 2 {
+			t.Fatal("the plugin was not confirmed idempotently", err)
+		}
+	}
+}
+
 func TestReplacementTiming(t *testing.T) {
 	if replacementDue(nil, 800) || replacementDue(500, 799.99) || !replacementDue(500, 800) {
 		t.Fatal("five continuous minutes are required after an observed start")

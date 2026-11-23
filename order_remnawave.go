@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -36,6 +37,7 @@ type orderRemnawaveNode struct {
 	Port          int    `json:"port"`
 	Country       string `json:"countryCode"`
 	Note          string `json:"note"`
+	PluginUUID    string `json:"activePluginUuid"`
 	ConfigProfile struct {
 		UUID     string                  `json:"activeConfigProfileUuid"`
 		Inbounds []orderRemnawaveInbound `json:"activeInbounds"`
@@ -104,6 +106,48 @@ func (r *Remnawave) orderProfiles(ctx context.Context) ([]orderPanelProfile, err
 	return profiles, nil
 }
 
+func (r *Remnawave) orderPlugins(ctx context.Context) ([]orderChoice, error) {
+	var response struct {
+		Plugins []struct {
+			UUID string `json:"uuid"`
+			Name string `json:"name"`
+		} `json:"nodePlugins"`
+	}
+	if err := r.orderRequest(ctx, http.MethodGet, "node-plugins", nil, &response); err != nil {
+		return nil, err
+	}
+	if response.Plugins == nil {
+		return nil, integration("Remnawave returned an invalid node plugin list")
+	}
+	choices := make([]orderChoice, 0, len(response.Plugins))
+	seen := make(map[string]bool, len(response.Plugins))
+	for _, plugin := range response.Plugins {
+		id, valid := canonicalUUID(plugin.UUID)
+		if !valid || strings.TrimSpace(plugin.Name) == "" || seen[id] {
+			return nil, integration("Remnawave returned an invalid node plugin list")
+		}
+		seen[id] = true
+		choices = append(choices, orderChoice{ID: id, Label: plugin.Name})
+	}
+	return choices, nil
+}
+
+func (r *Remnawave) orderPluginName(ctx context.Context, id string) (string, error) {
+	if id == "" {
+		return "", nil
+	}
+	plugins, err := r.orderPlugins(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, plugin := range plugins {
+		if plugin.ID == id {
+			return plugin.Label, nil
+		}
+	}
+	return "", errors.New("выбранный плагин ноды не найден в Remnawave")
+}
+
 func (r *Remnawave) checkOrderProfile(ctx context.Context, profileID string, inbounds []string) error {
 	profileID, requested, err := orderRemnawaveProfile(profileID, inbounds)
 	if err != nil {
@@ -163,7 +207,7 @@ func orderRemnawaveProfile(profileID string, inbounds []string) (string, []strin
 	return profile, ids, nil
 }
 
-func (r *Remnawave) ensureOrderNode(ctx context.Context, orderID, name, ip, country, profileID string, inbounds []string) (string, error) {
+func (r *Remnawave) ensureOrderNode(ctx context.Context, orderID, name, ip, country, profileID string, inbounds []string, pluginID string) (string, error) {
 	orderID, valid := canonicalUUID(orderID)
 	name = strings.TrimSpace(name)
 	country = strings.ToUpper(country)
@@ -196,7 +240,8 @@ func (r *Remnawave) ensureOrderNode(ctx context.Context, orderID, name, ip, coun
 			id, valid := canonicalUUID(n.UUID)
 			if found != "" || !valid || n.Name != name || n.Address != ip || n.Port != orderRemnawaveNodePort || n.Country != country ||
 				!strings.EqualFold(n.ConfigProfile.UUID, profileID) ||
-				!hasOrderRemnawaveInbounds(n.ConfigProfile.Inbounds, inbounds) {
+				!hasOrderRemnawaveInbounds(n.ConfigProfile.Inbounds, inbounds) ||
+				(pluginID != "" && !strings.EqualFold(n.PluginUUID, pluginID)) {
 				return "", integration("The Remnawave node marked for this order does not match its saved configuration")
 			}
 			found = id
@@ -206,7 +251,7 @@ func (r *Remnawave) ensureOrderNode(ctx context.Context, orderID, name, ip, coun
 	if existing, err := find(); err != nil || existing != "" {
 		return existing, err
 	}
-	createErr := r.orderRequest(ctx, http.MethodPost, "nodes", row{
+	create := row{
 		"name":        name,
 		"address":     ip,
 		"port":        orderRemnawaveNodePort,
@@ -216,7 +261,11 @@ func (r *Remnawave) ensureOrderNode(ctx context.Context, orderID, name, ip, coun
 			"activeConfigProfileUuid": profileID,
 			"activeInbounds":          inbounds,
 		},
-	}, nil)
+	}
+	if pluginID != "" {
+		create["activePluginUuid"] = pluginID
+	}
+	createErr := r.orderRequest(ctx, http.MethodPost, "nodes", create, nil)
 	// The panel enforces unique name and address. Even if a retry raced a
 	// pending POST, the readback adopts only the node marked for this order.
 	id, err := find()

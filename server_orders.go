@@ -51,6 +51,7 @@ type orderSelection struct {
 	Group     string `json:"group"`
 	ProfileID string `json:"profile_id"`
 	Provider  string `json:"provider,omitempty"`
+	PluginID  string `json:"plugin_uuid,omitempty"`
 }
 
 type orderInstaller interface {
@@ -101,6 +102,11 @@ func (s *Store) initializeOrders() {
 	columns := s.all("PRAGMA table_info(server_orders)")
 	if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == "provider" }) {
 		s.exec("ALTER TABLE server_orders ADD COLUMN provider TEXT NOT NULL DEFAULT 'upcloud'")
+	}
+	for _, name := range []string{"plugin_uuid", "plugin_name"} {
+		if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == name }) {
+			s.exec("ALTER TABLE server_orders ADD COLUMN " + name + " TEXT NOT NULL DEFAULT ''")
+		}
 	}
 	for _, name := range []string{"delete_pending", "deleted_resources", "delete_unreachable"} {
 		if !slices.ContainsFunc(columns, func(column row) bool { return column["name"] == name }) {
@@ -264,6 +270,12 @@ func (m *orderManager) options(ctx context.Context, kind, zone, poolID, group, p
 		}
 	case "group":
 		choices = []orderChoice{{ID: "nodes", Label: "Обычная нода (nodes)"}, {ID: "nodes_wl", Label: "Нода за CDN (nodes_wl)"}}
+	case "plugin":
+		r, err := m.a.remnawaveProvider()
+		if err != nil {
+			return nil, err
+		}
+		return r.orderPlugins(ctx)
 	case "profile":
 		if group != "" {
 			if err := m.checkOrderGroup(ctx, group); err != nil {
@@ -392,6 +404,10 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 	if err != nil {
 		return "", err
 	}
+	pluginName, err := panel.orderPluginName(ctx, sel.PluginID)
+	if err != nil {
+		return "", err
+	}
 	profiles, err := panel.orderProfiles(ctx)
 	if err != nil {
 		return "", err
@@ -444,8 +460,8 @@ func (m *orderManager) queue(ctx context.Context, requestID string, sel orderSel
 		}
 		id, stamp := uid(), iso(time.Now())
 		s.transaction(func() {
-			s.exec(`INSERT INTO server_orders(id,request_id,selection_hash,pool_id,pool_hostname,zone_id,ttl,zone,country,plan,quote,group_name,profile_id,profile_name,inbounds,serial,alias,domain,created_at,updated_at,provider)
- VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, requestID, selectionDigest(sel), sel.PoolID, p["hostname"], p["zone_id"], p["ttl"], sel.Zone, country, plan.Code, sel.Plan, sel.Group, profile.ID, profile.Name, string(encoded), serial, alias, domain, stamp, stamp, sel.Provider)
+			s.exec(`INSERT INTO server_orders(id,request_id,selection_hash,pool_id,pool_hostname,zone_id,ttl,zone,country,plan,quote,group_name,profile_id,profile_name,inbounds,serial,alias,domain,created_at,updated_at,provider,plugin_uuid,plugin_name)
+ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, requestID, selectionDigest(sel), sel.PoolID, p["hostname"], p["zone_id"], p["ttl"], sel.Zone, country, plan.Code, sel.Plan, sel.Group, profile.ID, profile.Name, string(encoded), serial, alias, domain, stamp, stamp, sel.Provider, sel.PluginID, pluginName)
 			if autoHost != nil {
 				s.exec("UPDATE server_order_auto_hosts SET order_id=? WHERE hostname=?", id, autoHost["hostname"])
 			}

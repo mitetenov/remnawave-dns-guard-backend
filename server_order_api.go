@@ -31,7 +31,7 @@ func serverOrderError(err error) {
 func (a *App) orderRoutes() {
 	a.route("GET /api/server-orders", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.withStore(func() any {
-			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,create_attempted,can_retry_create,deleted_resources,retry_operation_id,
+			jobs := a.s.all(`SELECT id,domain,stage,error,zone,plan,created_at,updated_at,ip,provider,pool_hostname,group_name,profile_name,plugin_name,create_attempted,can_retry_create,deleted_resources,retry_operation_id,
  (SELECT hostname FROM server_order_auto_hosts WHERE order_id=server_orders.id) AS auto_hostname
  FROM server_orders WHERE ` + orderActive + ` OR stage='complete' OR id IN (SELECT id FROM server_orders ORDER BY created_at DESC LIMIT 200) ORDER BY created_at DESC`)
 			for _, j := range jobs {
@@ -143,10 +143,18 @@ func (a *App) orderRoutes() {
 			Group    string `json:"group"`
 			Profile  string `json:"profile_id"`
 			Provider string `json:"provider"`
+			PluginID string `json:"plugin_uuid"`
 		}
 		bodyObject(w, r, &data, []string{"request_id", "zone", "plan", "pool_id", "group", "profile_id"})
+		if data.PluginID != "" {
+			var valid bool
+			if data.PluginID, valid = canonicalUUID(data.PluginID); !valid {
+				invalid("plugin_uuid")
+			}
+		}
 		id, err := a.orders.queue(r.Context(), data.Request, orderSelection{
 			Zone: data.Zone, Plan: data.Plan, PoolID: data.Pool, Group: data.Group, ProfileID: data.Profile, Provider: data.Provider,
+			PluginID: data.PluginID,
 		})
 		serverOrderError(err)
 		return row{"id": id}

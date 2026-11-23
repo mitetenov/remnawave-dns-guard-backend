@@ -112,6 +112,9 @@ func (m *orderManager) preflight(j row) error {
 	if err = panel.checkOrderProfile(ctx, str(j["profile_id"]), ids); err != nil {
 		return err
 	}
+	if _, err = panel.orderPluginName(ctx, str(j["plugin_uuid"])); err != nil {
+		return err
+	}
 	if _, err = panel.orderNodeSecret(ctx); err != nil {
 		return err
 	}
@@ -275,7 +278,7 @@ func (m *orderManager) step(j row) error {
 		if country == "UK" {
 			country = "GB"
 		}
-		id, err := panel.ensureOrderNode(ctx, str(j["id"]), str(j["alias"]), str(j["ip"]), country, str(j["profile_id"]), ids)
+		id, err := panel.ensureOrderNode(ctx, str(j["id"]), str(j["alias"]), str(j["ip"]), country, str(j["profile_id"]), ids, str(j["plugin_uuid"]))
 		if err != nil {
 			return err
 		}

@@ -322,7 +322,11 @@ func (r *Remnawave) nodes() ([]row, error) {
 			}
 			profile = p["activeConfigProfileUuid"]
 		}
-		out = append(out, row{"uuid": n["uuid"], "name": n["name"], "address": n["address"], "is_connected": truth(n["isConnected"]), "config_profile_uuid": profile})
+		node := row{"uuid": n["uuid"], "name": n["name"], "address": n["address"], "is_connected": truth(n["isConnected"]), "config_profile_uuid": profile}
+		if plugin, ok := n["activePluginUuid"].(string); ok {
+			node["active_plugin_uuid"] = plugin
+		}
+		out = append(out, node)
 	}
 	return out, nil
 }
