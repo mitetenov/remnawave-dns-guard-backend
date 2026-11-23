@@ -47,8 +47,10 @@ type replacementWorker struct {
 
 func newReplacementWorker(a *App) *replacementWorker {
 	ctx, cancel := context.WithCancel(context.Background())
+	ansible := newReplacementAnsible()
+	ansible.store = a.s
 	return &replacementWorker{
-		a: a, ctx: ctx, cancel: cancel, ansible: newReplacementAnsible(),
+		a: a, ctx: ctx, cancel: cancel, ansible: ansible,
 		providers: map[string]replacementAdapter{
 			"upcloud": {serverID: canonicalUUID, open: func() (replacementProvider, error) {
 				a.s.mu.Lock()

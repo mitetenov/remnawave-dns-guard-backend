@@ -18,6 +18,7 @@ import (
 
 type orderAnsibleNode struct {
 	Alias, Group, Domain, HostKey, Secret string
+	alloyTokens                           map[string]string
 }
 
 var replacementOrderDomainLabel = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$`)
@@ -28,7 +29,7 @@ const (
 )
 
 func (a *replacementAnsible) checkOrderConfiguration(ctx context.Context) error {
-	_, readyErr := a.ready(ctx, true)
+	_, readyErr := a.ready(ctx, true, a.vaultSettings())
 	if a != nil && a.repoDir == bundledReplacementAnsibleDir {
 		if dir, err := a.orderGroupVars(); err == nil && dir == "" {
 			return errors.Join(readyErr, validateBundledOrderVars(a.bundledOrderVars("nodes"), "nodes"))
@@ -61,7 +62,8 @@ func (a *replacementAnsible) processOrder(ctx context.Context, ip, id string, no
 	if !validReplacementOrderDomain(node.Domain) {
 		return errors.New("new node playbooks require a valid node domain")
 	}
-	timeout, err := a.ready(ctx, true)
+	vault := a.vaultSettings()
+	timeout, err := a.ready(ctx, true, vault)
 	if err != nil {
 		return err
 	}
@@ -81,11 +83,21 @@ func (a *replacementAnsible) processOrder(ctx context.Context, ip, id string, no
 			return err
 		}
 	}
-	work, err := a.createAnsibleWorkspace(knownHosts)
+	work, err := a.createAnsibleWorkspace(ctx, knownHosts)
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(work)
+	a, err = a.withVaultPassword(work, vault.password)
+	if err != nil {
+		return err
+	}
+	if a.repoDir == bundledReplacementAnsibleDir && vault.variables != "" {
+		node.alloyTokens, err = a.readAlloyVault(ctx, work, vault.variables)
+		if err != nil {
+			return err
+		}
+	}
 	return a.processRepository(ctx, work, ip, id, nil, &node, checkOnly)
 }
 
@@ -114,13 +126,21 @@ func (a *replacementAnsible) orderGroupVars() (string, error) {
 		dir = filepath.Join(filepath.Dir(defaultOrderGroupVarsDir), "ansible", "inventory", "group_vars")
 		info, err = os.Stat(dir)
 		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
+			dir = a.bundledGroupVars()
+			info, err = os.Stat(dir)
+			if errors.Is(err, os.ErrNotExist) {
+				return "", nil
+			}
 		}
 	}
 	if !filepath.IsAbs(dir) || err != nil || !info.IsDir() {
 		return "", fmt.Errorf("подключите каталог настроек нод %s или задайте REPLACEMENT_ANSIBLE_GROUP_VARS_DIR с абсолютным путём внутри backend", dir)
 	}
 	return dir, nil
+}
+
+func (a *replacementAnsible) bundledGroupVars() string {
+	return filepath.Join(a.repoDir, "inventory", "group_vars")
 }
 
 func (a *replacementAnsible) bundledOrderVars(group string) map[string]any {
@@ -208,10 +228,20 @@ func (a *replacementAnsible) loginKeySetting() string {
 	if a.sshKeyBase64 != "" {
 		return replacementLoginKeyEnv
 	}
+	if a.useManagedLoginKey() {
+		return "the managed Ansible SSH key"
+	}
 	return replacementAnsibleEnv + "SSH_KEY"
 }
 
-func (a *replacementAnsible) stageLoginKey(path string) error {
+func (a *replacementAnsible) useManagedLoginKey() bool {
+	return a.store != nil && a.sshKey == "" && a.sshKeyBase64 == ""
+}
+
+func (a *replacementAnsible) stageLoginKey(ctx context.Context, path string) error {
+	if a.useManagedLoginKey() {
+		return a.stageManagedLoginKey(ctx, path)
+	}
 	if a.sshKeyBase64 == "" {
 		if err := os.Symlink(a.sshKey, path); err != nil {
 			return errors.New("cannot prepare replacement Ansible SSH identity")
@@ -238,7 +268,7 @@ func (a *replacementAnsible) loginPublicKey(ctx context.Context) (string, error)
 	if a == nil || !replacementAnsibleSupported {
 		return "", errors.New("replacement Ansible runner is unavailable")
 	}
-	if a.sshKeyBase64 == "" && !filepath.IsAbs(a.sshKey) {
+	if a.sshKeyBase64 == "" && !a.useManagedLoginKey() && !filepath.IsAbs(a.sshKey) {
 		return "", errors.New("REPLACEMENT_ANSIBLE_SSH_KEY must point to an absolute path")
 	}
 	output, err := a.readLoginPublicKey(ctx)
@@ -253,14 +283,14 @@ func (a *replacementAnsible) loginPublicKey(ctx context.Context) (string, error)
 
 func (a *replacementAnsible) readLoginPublicKey(ctx context.Context) ([]byte, error) {
 	path := a.sshKey
-	if a.sshKeyBase64 != "" {
+	if a.sshKeyBase64 != "" || a.useManagedLoginKey() {
 		work, err := os.MkdirTemp("/tmp", "dns-guard-login-key-")
 		if err != nil {
 			return nil, errors.New("cannot create a temporary SSH key directory")
 		}
 		defer os.RemoveAll(work)
 		path = filepath.Join(work, "login_key")
-		if err := a.stageLoginKey(path); err != nil {
+		if err := a.stageLoginKey(ctx, path); err != nil {
 			return nil, err
 		}
 	}

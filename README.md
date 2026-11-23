@@ -231,7 +231,7 @@ Repository variables: `DOCKERHUB_USERNAME`, `DOCKERHUB_IMAGE`.
 Для GitHub Actions нужны `DOCKERHUB_TOKEN` с правами Read & Write и `ANSIBLE_REPO_TOKEN` с правом `Contents: Read-only` на `mitetenov/ansible`. BuildKit получает токен Ansible как секрет на время загрузки файлов. Ревизия источника задана `ANSIBLE_REVISION` в `Dockerfile`.
 В `docker-compose.yaml` указаны готовые образы backend и frontend с тегом `latest`.
 Для обновления выполните `docker compose pull` и `docker compose up -d`.
-Для заказов серверов и автозамены актуальный `docker-compose.yaml` подключает каталог Ansible из `REPLACEMENT_HOST_DIR` в `.env`. Если раньше использовались два Compose-файла, обновите основной файл и удалите строку `COMPOSE_FILE` из `.env`. [Подключение Ansible](docs/replacements.md)
+Для встроенных плейбуков настройте Ansible Vault в панели. Каталог Ansible из `REPLACEMENT_HOST_DIR` в `.env` нужен для внешних плейбуков и файловых переопределений. [Настройка Ansible](docs/replacements.md)
 Для отката замените тег непосредственно в нужном `image:` на `sha-<полный commit SHA>`.
 Теги бэкенда и UI относятся к независимым commit SHA.
 

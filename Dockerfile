@@ -20,8 +20,8 @@ FROM --platform=$BUILDPLATFORM alpine:3.24 AS ansible
 ARG ANSIBLE_REVISION=b0da191de3c5227fff4b4df43702fca38ad7771b
 RUN apk add --no-cache ansible-core ca-certificates git
 WORKDIR /opt/dns-guard/ansible
-# Export only node deployment assets. The upstream inventory, vault and
-# Alloy configuration belong to the operator's deployment.
+# Export the node deployment assets and replace the upstream Grafana tokens
+# before this build step writes a layer.
 RUN --mount=type=secret,id=ansible_repo_token,required=true set -eu; \
     source_dir=$(mktemp -d); \
     trap 'rm -rf "$source_dir"' EXIT; \
@@ -31,10 +31,23 @@ RUN --mount=type=secret,id=ansible_repo_token,required=true set -eu; \
         fetch -q --depth=1 https://github.com/mitetenov/ansible.git "$ANSIBLE_REVISION"; \
     git -C "$source_dir" archive -o "$source_dir/node-assets.tar" FETCH_HEAD \
         requirements.yml playbooks/nodes.yml playbooks/nodes-wl.yml \
+        inventory/group_vars/all.yml inventory/group_vars/nodes.yml inventory/group_vars/nodes_wl.yml \
         roles/common/defaults roles/common/files roles/common/handlers roles/common/meta roles/common/tasks roles/common/templates/sysctl \
+        roles/common/templates/alloy/config.alloy.j2 \
         roles/docker roles/ssl roles/stack_nodes roles/warp_native \
         files/nodes/docker-compose.yml files/nodes/html; \
     tar -xf "$source_dir/node-assets.tar"; \
+    alloy=roles/common/templates/alloy/config.alloy.j2; \
+    test "$(grep -Ec '^[[:space:]]*password[[:space:]]*=' "$alloy")" -eq 2; \
+    sed -i \
+        -e '/^prometheus\.remote_write "metrics_service" {$/,/^}$/s/^\([[:space:]]*password[[:space:]]*=[[:space:]]*\).*$/\1{{ grafana_cloud_prometheus_token | to_json }}/' \
+        -e '/^loki\.write "grafana_cloud_loki" {$/,/^}$/s/^\([[:space:]]*password[[:space:]]*=[[:space:]]*\).*$/\1{{ grafana_cloud_loki_token | to_json }}/' \
+        "$alloy"; \
+    grep -Fq '{{ grafana_cloud_prometheus_token | to_json }}' "$alloy"; \
+    grep -Fq '{{ grafana_cloud_loki_token | to_json }}' "$alloy"; \
+    tasks=roles/common/tasks/alloy.yml; \
+    sed -i '/^- name: Alloy config$/a\  no_log: true\n  diff: false' "$tasks"; \
+    grep -Fqx '  no_log: true' "$tasks"; \
     printf '%s\n' "$ANSIBLE_REVISION" > REVISION
 
 RUN set -eu; \

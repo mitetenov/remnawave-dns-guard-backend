@@ -13,6 +13,62 @@ import (
 	"testing"
 )
 
+func TestAnsibleManagedLoginKeyPersistsAcrossRuns(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen is unavailable")
+	}
+	a, _ := panelTestApp(t)
+	runner := &replacementAnsible{store: a.s}
+	first, err := runner.loginPublicKey(t.Context())
+	if err != nil || !strings.HasPrefix(first, "ssh-ed25519 ") {
+		t.Fatalf("could not load the generated public key: %v", err)
+	}
+	second, err := (&replacementAnsible{store: a.s}).loginPublicKey(t.Context())
+	if err != nil || first != second {
+		t.Fatal("the installed nodes need the same SSH identity on subsequent runs")
+	}
+	private := a.s.get(ansibleSSHKey)
+	if private == "" || str(a.s.one("SELECT value FROM settings WHERE key=?", ansibleSSHKey)["value"]) == private {
+		t.Fatal("the private key must be stored encrypted")
+	}
+}
+
+func TestAnsibleAlloyVaultDecryptsUsingSavedPassword(t *testing.T) {
+	if _, err := exec.LookPath("ansible-vault"); err != nil {
+		t.Skip("ansible-vault is unavailable")
+	}
+	work := t.TempDir()
+	runner, err := (&replacementAnsible{}).withVaultPassword(work, "vault-test-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(runner.vaultPasswordFile); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatal("the password file must be readable only by its owner")
+	}
+	const payload = `{"grafana_cloud_prometheus_token":"metrics-fixture","grafana_cloud_loki_token":"logs-fixture"}`
+	encryptedPath := filepath.Join(work, "fixture.vault")
+	cmd := exec.CommandContext(t.Context(), "ansible-vault", "encrypt", "--output", encryptedPath)
+	cmd.Dir, cmd.Env, cmd.Stdin = work, runner.environment(work), strings.NewReader(payload)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("could not encrypt fixture: %v", err)
+	}
+	encrypted, err := os.ReadFile(encryptedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := runner.readAlloyVault(t.Context(), work, string(encrypted))
+	if err != nil || tokens["grafana_cloud_prometheus_token"] != "metrics-fixture" || tokens["grafana_cloud_loki_token"] != "logs-fixture" {
+		t.Fatalf("could not decrypt Vault tokens: %v", err)
+	}
+	invalid, err := runner.withVaultPassword(work, "incorrect-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens, err := invalid.readAlloyVault(t.Context(), work, string(encrypted)); err == nil || tokens != nil || strings.Contains(err.Error(), "incorrect-password") {
+		t.Fatal("a bad Vault password must fail without disclosing it")
+	}
+}
+
 func TestAnsibleLoginKeyFromEnvironment(t *testing.T) {
 	sshKeygen, err := exec.LookPath("ssh-keygen")
 	if err != nil {
@@ -40,7 +96,7 @@ func TestAnsibleLoginKeyFromEnvironment(t *testing.T) {
 	if key, err := runner.loginPublicKey(t.Context()); err != nil || key != expectedPublic {
 		t.Fatalf("could not derive expected public key: %v", err)
 	}
-	work, err := runner.createAnsibleWorkspace("")
+	work, err := runner.createAnsibleWorkspace(t.Context(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
