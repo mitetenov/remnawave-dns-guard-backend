@@ -36,7 +36,8 @@ func (a *replacementAnsible) readyRepository(order bool) error {
 	if !order {
 		files = append(files, "inventory/hosts.yml")
 	} else if a.repoDir == bundledReplacementAnsibleDir {
-		files = append(files, "files/nodes/docker-compose.yml")
+		files = append(files, "files/nodes/docker-compose.yml", "roles/common/files/docker-compose.yml", "roles/common/templates/alloy/config.alloy.j2",
+			"inventory/group_vars/all.yml", "inventory/group_vars/nodes.yml", "inventory/group_vars/nodes_wl.yml")
 	}
 	for _, name := range files {
 		info, err := os.Stat(filepath.Join(a.repoDir, name))
@@ -99,7 +100,7 @@ become = true
 	if err := os.WriteFile(configFile, []byte(config), 0o600); err != nil {
 		return errors.New("cannot prepare replacement Ansible configuration")
 	}
-	env := append(replacementAnsibleEnvironment(work),
+	env := append(a.environment(work),
 		"ANSIBLE_ROLES_PATH="+filepath.Join(a.repoDir, "roles"),
 		"ANSIBLE_COLLECTIONS_PATH="+filepath.Join(a.repoDir, "collections"),
 		"ANSIBLE_COLLECTIONS_SCAN_SYS_PATH=False",
@@ -132,8 +133,23 @@ become = true
 		hostVars["stack_node_port"] = orderRemnawaveNodePort
 		delete(hostVars, "stack_nodes_env_content")
 		if bundledOrder {
-			// The bundled roles omit the upstream's deployment-specific Alloy configuration.
-			hostVars["common_alloy_enabled"] = false
+			if dir, err := os.Readlink(filepath.Join(varsBase, "group_vars")); err == nil && dir == a.bundledGroupVars() {
+				for name, value := range map[string]string{
+					"ssl_certbot_email": a.orderCertbotEmail, "nginx_node_xhttp_path": a.orderXHTTPPath, "nginx_node_xhttp_upstream": a.orderXHTTPUpstream,
+				} {
+					if value != "" {
+						raw, _ := json.Marshal(value)
+						hostVars[name] = json.RawMessage(raw)
+					}
+				}
+			}
+			for name, token := range order.alloyTokens {
+				hostVars[name] = token
+			}
+			enabled, _ := hostVars["common_alloy_enabled"].(json.RawMessage)
+			if string(enabled) != "false" && (hostVars["grafana_cloud_prometheus_token"] == nil || hostVars["grafana_cloud_loki_token"] == nil) {
+				return errors.New("Укажите токены Grafana в настройках Ansible")
+			}
 			if err := validateBundledOrderVars(hostVars, group); err != nil {
 				return err
 			}

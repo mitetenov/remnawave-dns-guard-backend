@@ -4,24 +4,24 @@
 
 ## Ansible для заказов серверов
 
-Образ backend содержит плейбуки для обычных нод (`nodes`) и нод за CDN (`nodes_wl`), их роли, файлы развёртывания и коллекции. При сборке они загружаются из зафиксированной ревизии основной ветки `mitetenov/ansible`. Для заказов DNS Guard формирует inventory с одной нодой, подставляет её домен и ключ Remnawave. Приватный SSH-ключ и настройки групп подключаются с машины развёртывания. Встроенный комплект пропускает установку Alloy, поскольку исходный шаблон настроен для конкретной установки Grafana. [Ревизия Ansible в образе](https://github.com/mitetenov/ansible/tree/d08132cf664ed60174292e09565342dda0e267fb)
+Образ backend содержит плейбуки обычных нод (`nodes`) и нод за CDN (`nodes_wl`), роли, коллекции и настройки этих групп из зафиксированной ревизии `mitetenov/ansible`. DNS Guard подставляет домен и ключ ноды Remnawave, регистрирует публичный ключ хоста и использует один SSH-ключ установки, хранящийся в зашифрованной базе. Новая установка работает с основным файлом Compose. [Ревизия Ansible в образе](https://github.com/mitetenov/ansible/tree/b0da191de3c5227fff4b4df43702fca38ad7771b)
 
-1. Укажите в `.env` `REPLACEMENT_ANSIBLE_SSH_KEY_BASE64` со всем содержимым приватного SSH-ключа в Base64 одной строкой. Ключ должен работать без запроса пароля. Храните `.env` с правами `0600`. По умолчанию для входа используется `root`. Для другого пользователя задайте `REPLACEMENT_ANSIBLE_SSH_USER` в `.env` и настройте повышение привилегий на нодах.
+### Пароль Ansible Vault и Grafana Alloy
 
-   Для подключения ключа файлом задайте `REPLACEMENT_HOST_DIR=./replacement` и положите ключ в `replacement/ssh_key` рядом с `docker-compose.yaml`. Можно указать абсолютный путь к каталогу на хосте. Внутри backend каталог доступен только для чтения по пути `/run/dns-guard/replacement`. Backend работает под UID 10001, которому нужны проход по каталогам и доступ на чтение ключа с правами `0600` или `0400`. Если заданы оба источника, ключ из `REPLACEMENT_ANSIBLE_SSH_KEY_BASE64` имеет приоритет.
+В **Настройки → Интеграции → Хостинги и Ansible** сохраните пароль Vault и содержимое зашифрованного файла с токенами Grafana Cloud. Alloy использует адреса и имена пользователей из репозитория Ansible. Токены задаются двумя переменными.
 
-2. Укажите свой email для Certbot в `REPLACEMENT_ANSIBLE_CERTBOT_EMAIL` в `.env`. Для типа `nodes_wl` добавьте `REPLACEMENT_ANSIBLE_XHTTP_PATH` из профиля Remnawave. Путь начинается и заканчивается косой чертой. Если профиль использует порт, отличный от 8443, задайте `REPLACEMENT_ANSIBLE_XHTTP_UPSTREAM=127.0.0.1:<порт>`. У обычной ноды стандартный TLS-вход nginx слушает `127.0.0.1:4321` с PROXY protocol.
+```json
+{
+  "grafana_cloud_prometheus_token": "<токен для метрик>",
+  "grafana_cloud_loki_token": "<токен для логов>"
+}
+```
 
-   Каталог `replacement/group_vars` можно использовать для переопределений в `all.yml`, `nodes.yml` и `nodes_wl.yml`. Значения из этих файлов имеют приоритет над стандартными параметрами и настройками Certbot и XHTTP из `.env`. Произвольный путь внутри контейнера задаётся через `REPLACEMENT_ANSIBLE_GROUP_VARS_DIR`.
+Подготовьте этот JSON на рабочей машине и зашифруйте командой `ansible-vault encrypt grafana.json`. Вставьте в панель содержимое зашифрованного файла целиком, включая заголовок `$ANSIBLE_VAULT`. DNS Guard применяет сохранённые настройки при следующем запуске Ansible. Для DNS-записей узла используется токен Cloudflare из раздела **Интеграции**. Certbot выпускает сертификаты через HTTP-01.
 
-3. Запустите Compose из каталога установки. Для перехода с двух Compose-файлов сначала обновите основной `docker-compose.yaml` и удалите `COMPOSE_FILE` из `.env`. [Основной файл Compose](../docker-compose.yaml)
+При переходе со смонтированного ключа воспользуйтесь пунктом **Перенести действующий SSH-ключ** перед удалением прежней настройки. DNS Guard также поддерживает существующие `REPLACEMENT_ANSIBLE_SSH_KEY_BASE64` и `REPLACEMENT_ANSIBLE_SSH_KEY`. Каталог `REPLACEMENT_HOST_DIR` нужен для собственных плейбуков или файловых переопределений. [Основной файл Compose](../docker-compose.yaml)
 
-   ```sh
-   docker compose config --quiet
-   docker compose up -d
-   ```
-
-При обновлении со стандартной установки с внешним репозиторием backend также подхватывает `replacement/ansible/inventory/group_vars`, если `replacement/group_vars` отсутствует. Чтобы использовать плейбуки из образа, удалите `REPLACEMENT_ANSIBLE_REPO_DIR` из `.env`. Если внешний репозиторий нужен для ручных привязок, задайте `REPLACEMENT_ANSIBLE_MANUAL_REPO_DIR=/run/dns-guard/replacement/ansible`. Чтобы использовать внешние плейбуки для обоих режимов, оставьте `REPLACEMENT_ANSIBLE_REPO_DIR` с путём к смонтированному репозиторию.
+Настройки Certbot и XHTTP берутся из групп, упакованных в образ. Для встроенных групп можно переопределить email и параметры XHTTP через `REPLACEMENT_ANSIBLE_CERTBOT_EMAIL`, `REPLACEMENT_ANSIBLE_XHTTP_PATH` и `REPLACEMENT_ANSIBLE_XHTTP_UPSTREAM`. Отдельный каталог `REPLACEMENT_ANSIBLE_GROUP_VARS_DIR` или прежний `replacement/group_vars` по-прежнему подходит для собственных настроек групп и имеет приоритет над этими переменными.
 
 ### Плагин ноды Remnawave
 

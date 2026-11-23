@@ -81,9 +81,12 @@ func (a *App) providerReadiness(ctx context.Context) row {
 	a.s.mu.Lock()
 	defer a.s.mu.Unlock()
 	return row{
-		"upcloud_configured": a.s.get("upcloud_token") != "",
-		"virtua_configured":  a.s.get("virtua_token") != "",
-		"ansible_ready":      readyErr == nil, "ansible_error": message,
+		"upcloud_configured":                a.s.get("upcloud_token") != "",
+		"virtua_configured":                 a.s.get("virtua_token") != "",
+		"ansible_vault_password_configured": a.s.get(ansibleVaultPasswordKey) != "",
+		"ansible_vault_file_configured":     a.s.get(ansibleVaultVariablesKey) != "",
+		"ansible_ssh_key_configured":        a.s.get(ansibleSSHKey) != "",
+		"ansible_ready":                     readyErr == nil, "ansible_error": message,
 		"order_ansible_ready": orderErr == nil, "order_ansible_error": orderMessage,
 	}
 }
@@ -91,6 +94,52 @@ func (a *App) providerReadiness(ctx context.Context) row {
 func (a *App) replacementRoutes() {
 	a.route("GET /api/settings/providers", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		return a.providerReadiness(r.Context())
+	})
+	a.route("PUT /api/settings/providers/ansible", "ui", func(w http.ResponseWriter, r *http.Request) any {
+		var data struct {
+			Password *string `json:"vault_password"`
+			File     *string `json:"vault_file"`
+			SSHKey   *string `json:"ssh_private_key"`
+		}
+		bodyObject(w, r, &data, nil)
+		if data.Password == nil && data.File == nil && data.SSHKey == nil {
+			invalid("request")
+		}
+		if data.Password != nil && (!textLength(*data.Password, 1, 4096) || strings.TrimSpace(*data.Password) == "" ||
+			strings.ContainsAny(*data.Password, "\r\n\x00")) {
+			invalid("vault_password")
+		}
+		var file string
+		if data.File != nil {
+			file = strings.ReplaceAll(strings.TrimSpace(*data.File), "\r\n", "\n") + "\n"
+			if !validAnsibleVaultFile(file) {
+				invalid("vault_file")
+			}
+		}
+		var sshKey string
+		if data.SSHKey != nil {
+			sshKey = strings.ReplaceAll(strings.TrimSpace(*data.SSHKey), "\r\n", "\n") + "\n"
+			if !validAnsibleSSHIdentity(r.Context(), sshKey) {
+				invalid("ssh_private_key")
+			}
+		}
+		return a.withStore(func() any {
+			if existing := a.s.get(ansibleSSHKey); sshKey != "" && existing != "" && existing != sshKey {
+				fail(409, "Ключ Ansible уже используется. Для подключения к ранее установленной ноде нужен её действующий ключ")
+			}
+			a.s.transaction(func() {
+				if data.Password != nil {
+					a.s.set(ansibleVaultPasswordKey, *data.Password)
+				}
+				if data.File != nil {
+					a.s.set(ansibleVaultVariablesKey, file)
+				}
+				if sshKey != "" {
+					a.s.set(ansibleSSHKey, sshKey)
+				}
+			})
+			return row{"ok": true}
+		})
 	})
 	a.route("GET /api/replacements", "ui", func(w http.ResponseWriter, r *http.Request) any {
 		readiness := a.providerReadiness(r.Context())
