@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -18,7 +19,7 @@ func TestOrderAutoHostsReserveAndKeepSubscriptionAddress(t *testing.T) {
 		"inbound": row{"configProfileUuid": orderPanelProfileID, "configProfileInboundUuid": orderPanelInbound},
 		"path":    "/connection/", "overrideSniFromAddress": true, "nodes": []string{orderPanelOldNode}}}
 	records := map[string]row{}
-	hostCreates, aliasWrites := 0, 0
+	hostCreates, tagUpdates, aliasWrites := 0, 0, 0
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.Method + " " + req.URL.Path {
 		case "GET /api/hosts":
@@ -26,7 +27,8 @@ func TestOrderAutoHostsReserveAndKeepSubscriptionAddress(t *testing.T) {
 		case "POST /api/hosts":
 			var host row
 			if err := json.NewDecoder(req.Body).Decode(&host); err != nil || host["isHidden"] != true || host["isDisabled"] != false ||
-				host["sni"] != poolDomain || host["path"] != "/connection/" || host["nodes"] != nil {
+				host["sni"] != poolDomain || host["path"] != "/connection/" || host["nodes"] != nil ||
+				!reflect.DeepEqual(host["tags"], []any{defaultOrderAutoHostTag}) {
 				t.Fatal("unexpected hidden host creation", host, err)
 			}
 			host["uuid"] = uid()
@@ -36,6 +38,21 @@ func TestOrderAutoHostsReserveAndKeepSubscriptionAddress(t *testing.T) {
 				return nil, errors.New("lost response after creating the first host")
 			}
 			return response(row{"response": host}, 201), nil
+		case "PATCH /api/hosts":
+			var update row
+			if err := json.NewDecoder(req.Body).Decode(&update); err != nil || len(update) != 2 ||
+				!reflect.DeepEqual(update["tags"], []any{"EXISTING_TAG", defaultOrderAutoHostTag}) {
+				t.Fatal("unexpected tag update", update, err)
+			}
+			for _, host := range hosts {
+				if host["uuid"] == update["uuid"] && host["address"] == autoDomain {
+					host["tags"] = update["tags"]
+					tagUpdates++
+					return nil, errors.New("lost response after updating the tags")
+				}
+			}
+			t.Fatal("unexpected host for tag update", update["uuid"])
+			return nil, nil
 		case "GET /client/v4/zones":
 			return response(row{"success": true, "result": []row{{"id": "zone", "name": "example.com"}}}, 200), nil
 		case "GET " + dnsPath:
@@ -106,9 +123,15 @@ func TestOrderAutoHostsReserveAndKeepSubscriptionAddress(t *testing.T) {
 	delete(records, conflictDomain)
 	setup("FI", http.StatusOK)
 	setup("DE", http.StatusOK)
+	for _, host := range hosts {
+		if host["address"] == autoDomain {
+			host["tags"] = []any{"EXISTING_TAG"}
+		}
+	}
 	setup("DE", http.StatusOK)
-	if hostCreates != 20 || len(s.all("SELECT * FROM server_order_auto_hosts")) != 20 || len(records) != 0 {
-		t.Fatal("setup did not reserve exactly 20 idle slots, or recreated one on retry")
+	setup("DE", http.StatusOK)
+	if hostCreates != 20 || len(s.all("SELECT * FROM server_order_auto_hosts")) != 20 || len(records) != 0 || tagUpdates != 1 {
+		t.Fatal("setup did not reserve 20 tagged slots without DNS, or failed to update the existing slot once")
 	}
 	if _, err = s.freeOrderAutoHost("pool", "DE", orderPanelOther); err == nil {
 		t.Fatal("accepted an incompatible profile")
@@ -132,8 +155,13 @@ func TestOrderAutoHostsReserveAndKeepSubscriptionAddress(t *testing.T) {
 	s.exec("INSERT INTO targets(id,pool_id,ip) VALUES('target','pool',?)", orderOriginOld)
 	s.exec("UPDATE server_orders SET stage='verify',target_id='target',server_uuid=?,node_uuid=?,ip=?,inbounds=? WHERE id=?",
 		orderPanelID, orderPanelNode, orderOriginOld, `["`+orderPanelInbound+`"]`, orderOriginID)
+	for _, host := range hosts {
+		if host["uuid"] == first["host_uuid"] {
+			host["tags"] = []any{"EXISTING_TAG"}
+		}
+	}
 	order := s.one("SELECT * FROM server_orders WHERE id=?", orderOriginID)
-	if err = app.orders.finish(order); !errors.Is(err, errReplacementPending) || aliasWrites != 0 {
+	if err = app.orders.finish(order); !errors.Is(err, errReplacementPending) || aliasWrites != 0 || tagUpdates != 1 {
 		t.Fatal("published before the fresh health checks", err)
 	}
 	now := nowSeconds()
@@ -149,7 +177,7 @@ func TestOrderAutoHostsReserveAndKeepSubscriptionAddress(t *testing.T) {
 	if _, err = checkReplacementOrigin(dns, order, orderOriginOld, orderOriginNew, true); err != nil {
 		t.Fatal(err)
 	}
-	if aliasWrites != 1 || records[autoDomain]["content"] != orderOriginDNS || records[orderOriginDNS]["content"] != orderOriginNew {
+	if tagUpdates != 2 || aliasWrites != 1 || records[autoDomain]["content"] != orderOriginDNS || records[orderOriginDNS]["content"] != orderOriginNew {
 		t.Fatal("cutover did not preserve the hostname and update the origin A")
 	}
 	s.exec("DELETE FROM targets WHERE id='target'")
