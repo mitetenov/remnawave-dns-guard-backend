@@ -69,7 +69,7 @@ func (a *replacementAnsible) readAlloyVault(ctx context.Context, work, encrypted
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, errors.New("Не удалось расшифровать Vault-файл Grafana. Проверьте файл и пароль в настройках Ansible")
+		return nil, errors.New("не удалось расшифровать Vault-файл Grafana. Проверьте файл и пароль в настройках Ansible")
 	}
 	var tokens struct {
 		Prometheus string `json:"grafana_cloud_prometheus_token"`
@@ -77,7 +77,7 @@ func (a *replacementAnsible) readAlloyVault(ctx context.Context, work, encrypted
 	}
 	if json.Unmarshal(plain, &tokens) != nil || len(tokens.Prometheus) > 4096 || len(tokens.Loki) > 4096 ||
 		!grafanaToken.MatchString(tokens.Prometheus) || !grafanaToken.MatchString(tokens.Loki) {
-		return nil, errors.New("Vault-файл Grafana должен содержать JSON с grafana_cloud_prometheus_token и grafana_cloud_loki_token")
+		return nil, errors.New("в Vault-файле Grafana укажите JSON с grafana_cloud_prometheus_token и grafana_cloud_loki_token")
 	}
 	return map[string]string{
 		"grafana_cloud_prometheus_token": tokens.Prometheus,
