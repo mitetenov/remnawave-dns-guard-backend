@@ -290,6 +290,33 @@ func TestUpCloudReplacementRecreatesServerWithoutAddressRequests(t *testing.T) {
 	}
 }
 
+func TestUpCloudReplacementNotifiesOrderBeforeServerIsReady(t *testing.T) {
+	fake, provider := newFakeReplacementUpCloud(t)
+	snapshot := retireFakeUpCloud(t, provider)
+	fake.next.State = "maintenance"
+	s := probeRefreshStore(t, 60)
+	s.exec("UPDATE notification_control SET enabled=1")
+	s.exec(`INSERT INTO replacement_jobs(id,target_id,pool_id,name,provider,server_uuid,node_uuid,old_ip,stage,snapshot,created_at,updated_at)
+ VALUES(?,'target','pool','Node','upcloud',?,'node',?,'provision',?,'now','now')`, testUpCloudOperation, testUpCloudOldServer, testUpCloudOldIP, s.cipher.encrypt(snapshot))
+	w := &replacementWorker{a: &App{s: s}, ctx: t.Context()}
+	job := func() row { return s.one("SELECT * FROM replacement_jobs WHERE id=?", testUpCloudOperation) }
+	for range 2 {
+		if err := w.changeServer(job(), provider); !errors.Is(err, errReplacementPending) || job()["new_ip"] != nil {
+			t.Fatalf("expected server to keep provisioning: %v", err)
+		}
+	}
+	if messages := s.all("SELECT status FROM notification_outbox"); len(messages) != 1 || messages[0]["status"] != "replacement_ordered" {
+		t.Fatalf("expected one order confirmation while waiting for IPv4: %v", messages)
+	}
+	fake.next.State = "started"
+	if err := w.changeServer(job(), provider); err != nil || job()["new_ip"] != testUpCloudNewIP || job()["stage"] != "ansible" {
+		t.Fatalf("expected the worker to continue once the server was running: %v", err)
+	}
+	if messages := s.all("SELECT status FROM notification_outbox"); len(messages) != 1 {
+		t.Fatalf("order confirmation was duplicated: %v", messages)
+	}
+}
+
 func TestUpCloudReplacementResumesLegacySnapshotAfterLostResponses(t *testing.T) {
 	fake, provider := newFakeReplacementUpCloud(t)
 	fake.createError = "lost-after"

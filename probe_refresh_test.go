@@ -116,8 +116,10 @@ func TestProbeRefreshReplacementDeadlineAndNotification(t *testing.T) {
 		t.Fatalf("replacement did not start on its deadline: %v", j)
 	}
 	refreshProbeState(s, now+replacementDelay.Seconds()+1)
-	if got := num(s.one("SELECT COUNT(*) n FROM notification_outbox")["n"]); got != 1 {
-		t.Fatalf("outbox contains %v messages, want 1", got)
+	if messages := s.all("SELECT status,replacement_id FROM notification_outbox ORDER BY id"); len(messages) != 2 ||
+		messages[0]["status"] != "excluded" || messages[1]["status"] != "replacement_started" ||
+		messages[1]["replacement_id"] != s.one("SELECT id FROM replacement_jobs")["id"] {
+		t.Fatalf("expected one exclusion and one replacement start: %v", messages)
 	}
 }
 
