@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
@@ -96,6 +96,37 @@ jobs:
           cache-to: type=gha,mode=max,scope=backend
       - name: Require AMD64 image
         run: test "$(docker image inspect dns-guard-backend:ci --format '{{.Architecture}}')" = amd64
+
+      - name: Smoke-test SQLite in the runtime image
+        run: |
+          docker run --rm --network none \
+            --env ADMIN_USERNAME=ci-user \
+            --env ADMIN_PASSWORD=ci-only-placeholder \
+            --env APP_SECRET=ci-only-app-secret-placeholder-000000000000 \
+            --env AGENT_TOKEN=ci-only-agent-token-placeholder-000000000000 \
+            --env DATABASE_PATH=/data/guard.db \
+            --tmpfs /data:uid=10001,gid=10001,mode=0700 \
+            --entrypoint /bin/sh dns-guard-backend:ci -eu -c '
+              /dns-guard &
+              pid=$!
+              trap "kill \"$pid\" 2>/dev/null || true" EXIT
+              for attempt in $(seq 1 30); do
+                if /dns-guard --healthcheck; then break; fi
+                kill -0 "$pid"
+                sleep 1
+              done
+              /dns-guard --healthcheck
+              kill "$pid"
+              wait "$pid"
+              trap - EXIT
+              test -s /data/guard.db
+              /dns-guard --backup /data/backup.db
+              test -s /data/backup.db
+              rm /data/guard.db
+              /dns-guard --restore /data/backup.db
+              /dns-guard --backup /data/roundtrip.db
+              test -s /data/roundtrip.db
+            '
 
   publish:
     timeout-minutes: 15
