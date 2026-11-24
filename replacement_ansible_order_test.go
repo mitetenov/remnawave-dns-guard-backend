@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -172,9 +173,12 @@ func TestBundledOrderVarsUseExternalDeploymentSettings(t *testing.T) {
 }
 
 func TestReplacementAnsibleOrdersUseGeneratedHostAndGroupVars(t *testing.T) {
-	for _, tc := range []struct{ group, playbook, fixtureAlias string }{
-		{"nodes", "nodes.yml", "germany-01"},
-		{"nodes_wl", "nodes-wl.yml", "denmark-01"},
+	for _, tc := range []struct {
+		group, playbook, fixtureAlias string
+		port                          int
+	}{
+		{"nodes", "nodes.yml", "germany-01", 11327},
+		{"nodes_wl", "nodes-wl.yml", "denmark-01", 2222},
 	} {
 		t.Run(tc.group, func(t *testing.T) {
 			f := newReplacementRepositoryFixture(t)
@@ -218,6 +222,7 @@ if [ "$1" = -l ]; then cat >/dev/null; else printf 'ssh-ed25519 AAAA login-comme
 			values := normalized.Meta.Vars[tc.fixtureAlias]
 			values["nginx_node_domain"] = "placeholder.example.com"
 			values["stack_nodes_env_content"] = "inherited-fixture-secret"
+			values["stack_node_port"] = 30000
 			listed, err := json.Marshal(map[string]any{
 				"_meta":  map[string]any{"hostvars": map[string]any{alias: values}},
 				"all":    map[string]any{"children": []string{tc.group}},
@@ -229,7 +234,7 @@ if [ "$1" = -l ]; then cat >/dev/null; else printf 'ssh-ed25519 AAAA login-comme
 			writeReplacementRepositoryFixture(t, filepath.Join(f.root, "order-normalized-inventory.json"), string(listed), 0o600)
 
 			runner := newOrderAnsible()
-			order := orderAnsibleNode{Alias: alias, Group: tc.group, Domain: domain}
+			order := orderAnsibleNode{Alias: alias, Group: tc.group, Domain: domain, Port: tc.port}
 			if err := runner.ReadyForOrder(context.Background(), order); err != nil {
 				t.Fatal(err)
 			}
@@ -252,6 +257,9 @@ if [ "$1" = -l ]; then cat >/dev/null; else printf 'ssh-ed25519 AAAA login-comme
 			if !strings.Contains(inventory, `"`+alias+`":{`) || !strings.Contains(inventory, `"nginx_node_domain":"`+domain+`"`) ||
 				!strings.Contains(inventory, `"stack_node_secret_key":"`+secret+`"`) || strings.Contains(inventory, "inherited-fixture-secret") {
 				t.Fatal("new node inventory must use the generated alias and the assigned domain and secret")
+			}
+			if !strings.Contains(inventory, `"stack_node_port":`+strconv.Itoa(tc.port)+`,`) {
+				t.Fatal("the inventory must use the Remnawave node control port")
 			}
 			if f.read(t, "captured-host-keys") != replacementTestNodeID+" "+hostKey+"\n" {
 				t.Fatal("new node SSH trust must pin the provided host key against the job UUID")

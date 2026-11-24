@@ -157,7 +157,7 @@ func TestRemnawaveOrderNodeReadbackAfterLostCreateReply(t *testing.T) {
 				}
 			}
 			if err := json.NewDecoder(req.Body).Decode(&body); err != nil ||
-				body.Name != name || body.Address != ip || body.CountryCode != "FI" || body.Port != 2222 ||
+				body.Name != name || body.Address != ip || body.CountryCode != "FI" || body.Port != 11327 ||
 				body.Note != "dns-guard-order:"+orderPanelID ||
 				body.ActivePluginUUID != orderPanelPlugin ||
 				body.ConfigProfile.ActiveConfigProfileUUID != orderPanelProfileID ||
@@ -185,17 +185,19 @@ func TestRemnawaveOrderNodeReadbackAfterLostCreateReply(t *testing.T) {
 	}
 }
 
-func TestRemnawaveOrderNodeRefusesConflictingOrChangedNodes(t *testing.T) {
+func TestRemnawaveOrderNodeValidatesExistingNodes(t *testing.T) {
 	const ip = "8.8.4.4"
 	const name = "fin-new-01"
-	for _, mode := range []string{"unrelated address", "unrelated name", "changed port", "changed profile", "changed inbounds", "duplicate order mark"} {
+	for _, mode := range []string{"current port", "legacy port", "unrelated address", "unrelated name", "changed port", "changed profile", "changed inbounds", "duplicate order mark"} {
 		t.Run(mode, func(t *testing.T) {
 			n := row{
-				"uuid": orderPanelNode, "name": name, "address": ip, "port": 2222, "countryCode": "FI", "note": "dns-guard-order:" + orderPanelID,
+				"uuid": orderPanelNode, "name": name, "address": ip, "port": 11327, "countryCode": "FI", "note": "dns-guard-order:" + orderPanelID,
 				"configProfile": row{"activeConfigProfileUuid": orderPanelProfileID, "activeInbounds": []row{{"uuid": orderPanelInbound}}},
 			}
 			nodes := []row{n}
 			switch mode {
+			case "legacy port":
+				n["port"] = 2222
 			case "unrelated address":
 				n["name"], n["note"] = "other", "unrelated"
 			case "unrelated name":
@@ -215,10 +217,39 @@ func TestRemnawaveOrderNodeRefusesConflictingOrChangedNodes(t *testing.T) {
 				}
 				return response(row{"response": nodes}, 200), nil
 			})
-			if id, err := panel.ensureOrderNode(context.Background(), orderPanelID, name, ip, "FI", orderPanelProfileID, []string{orderPanelInbound}, ""); id != "" || err == nil {
+			id, err := panel.ensureOrderNode(context.Background(), orderPanelID, name, ip, "FI", orderPanelProfileID, []string{orderPanelInbound}, "")
+			if mode == "current port" || mode == "legacy port" {
+				if id != orderPanelNode || err != nil {
+					t.Fatal("could not resume order with its existing node", id, err)
+				}
+			} else if id != "" || err == nil {
 				t.Fatal("accepted conflicting node", id, err)
 			}
 		})
+	}
+}
+
+func TestRemnawaveOrderReadsExistingNodeControlPort(t *testing.T) {
+	port, id := 2222, orderPanelNode
+	panel := orderPanelClient(t, func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet || req.URL.Path != "/api/nodes/"+orderPanelNode {
+			t.Fatal("unexpected request for the node control port")
+		}
+		return response(row{"response": row{"uuid": id, "port": port}}, http.StatusOK), nil
+	})
+	for _, value := range []int{2222, 11327, 30000} {
+		port = value
+		if got, err := panel.orderNodePort(t.Context(), orderPanelNode); got != value || err != nil {
+			t.Fatal("could not read the configured port", got, err)
+		}
+	}
+	port = 65536
+	if _, err := panel.orderNodePort(t.Context(), orderPanelNode); err == nil {
+		t.Fatal("accepted an invalid port")
+	}
+	port, id = 11327, orderPanelOther
+	if _, err := panel.orderNodePort(t.Context(), orderPanelNode); err == nil {
+		t.Fatal("accepted a different node")
 	}
 }
 

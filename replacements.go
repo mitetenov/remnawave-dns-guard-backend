@@ -243,6 +243,11 @@ func (w *replacementWorker) preflight(j row, prepare func() (json.RawMessage, st
 	if err = panel.checkReplacementNode(j, false); err != nil {
 		return err
 	}
+	if order != nil {
+		if _, err = panel.orderNodePort(w.ctx, str(j["node_uuid"])); err != nil {
+			return err
+		}
+	}
 	if _, err = panel.orderPluginName(w.ctx, str(j["plugin_uuid"])); err != nil {
 		return err
 	}
