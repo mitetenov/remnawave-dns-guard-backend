@@ -57,8 +57,26 @@ type orderRemnawaveHostInbound struct {
 
 var orderRemnawaveSecretPattern = regexp.MustCompile(`^[A-Za-z0-9+/_-]+={0,2}$`)
 
-// Match the Ansible node's control API port. It is separate from client inbounds.
-const orderRemnawaveNodePort = 2222
+// Control API ports used when creating nodes through server orders.
+const (
+	orderRemnawaveNodePort       = 11327
+	legacyOrderRemnawaveNodePort = 2222
+)
+
+func (r *Remnawave) orderNodePort(ctx context.Context, nodeID string) (int, error) {
+	id, valid := canonicalUUID(nodeID)
+	if !valid {
+		return 0, integration("The Remnawave node identity is invalid")
+	}
+	var node orderRemnawaveNode
+	if err := r.orderRequest(ctx, http.MethodGet, "nodes/"+id, nil, &node); err != nil {
+		return 0, err
+	}
+	if !strings.EqualFold(node.UUID, id) || node.Port < 1 || node.Port > 65535 {
+		return 0, integration("The Remnawave node control port could not be confirmed")
+	}
+	return node.Port, nil
+}
 
 func (r *Remnawave) orderNodeSecret(ctx context.Context) (string, error) {
 	var key struct {
@@ -238,7 +256,8 @@ func (r *Remnawave) ensureOrderNode(ctx context.Context, orderID, name, ip, coun
 				continue
 			}
 			id, valid := canonicalUUID(n.UUID)
-			if found != "" || !valid || n.Name != name || n.Address != ip || n.Port != orderRemnawaveNodePort || n.Country != country ||
+			if found != "" || !valid || n.Name != name || n.Address != ip || n.Country != country ||
+				(n.Port != orderRemnawaveNodePort && n.Port != legacyOrderRemnawaveNodePort) ||
 				!strings.EqualFold(n.ConfigProfile.UUID, profileID) ||
 				!hasOrderRemnawaveInbounds(n.ConfigProfile.Inbounds, inbounds) ||
 				(pluginID != "" && !strings.EqualFold(n.PluginUUID, pluginID)) {

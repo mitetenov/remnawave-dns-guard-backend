@@ -486,6 +486,10 @@ func (m *orderManager) install(ctx context.Context, j row, ip, nodeID string) er
 		return err
 	}
 	node := orderNode(j)
+	node.Port, err = p.orderNodePort(ctx, nodeID)
+	if err != nil {
+		return err
+	}
 	node.Secret, err = p.orderNodeSecret(ctx)
 	if err != nil {
 		return err

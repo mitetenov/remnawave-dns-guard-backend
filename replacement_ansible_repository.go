@@ -130,7 +130,7 @@ become = true
 		secret, _ := json.Marshal(order.Secret)
 		hostVars["nginx_node_domain"] = json.RawMessage(domain)
 		hostVars["stack_node_secret_key"] = json.RawMessage(secret)
-		hostVars["stack_node_port"] = orderRemnawaveNodePort
+		hostVars["stack_node_port"] = order.Port
 		delete(hostVars, "stack_nodes_env_content")
 		if bundledOrder {
 			if dir, err := os.Readlink(filepath.Join(varsBase, "group_vars")); err == nil && dir == a.bundledGroupVars() {

@@ -18,6 +18,7 @@ import (
 
 type orderAnsibleNode struct {
 	Alias, Group, Domain, HostKey, Secret string
+	Port                                  int
 	alloyTokens                           map[string]string
 }
 
@@ -41,6 +42,7 @@ func (a *replacementAnsible) checkOrderConfiguration(ctx context.Context) error 
 func (a *replacementAnsible) ReadyForOrder(ctx context.Context, node orderAnsibleNode) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
+	node.Port = orderRemnawaveNodePort
 	return a.processOrder(ctx, "192.0.2.1", replacementOrderCheckID, node, true)
 }
 
@@ -61,6 +63,9 @@ func (a *replacementAnsible) processOrder(ctx context.Context, ip, id string, no
 	}
 	if !validReplacementOrderDomain(node.Domain) {
 		return errors.New("new node playbooks require a valid node domain")
+	}
+	if node.Port < 1 || node.Port > 65535 {
+		return errors.New("new node playbooks require a valid node control port")
 	}
 	vault := a.vaultSettings()
 	timeout, err := a.ready(ctx, true, vault)
