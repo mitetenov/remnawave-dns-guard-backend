@@ -38,35 +38,77 @@ func TestAnsibleAlloyVaultDecryptsUsingSavedPassword(t *testing.T) {
 	if _, err := exec.LookPath("ansible-vault"); err != nil {
 		t.Skip("ansible-vault is unavailable")
 	}
-	work := t.TempDir()
-	runner, err := (&replacementAnsible{}).withVaultPassword(work, "vault-test-password")
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct{ name, payload string }{
+		{"JSON", `{"grafana_cloud_prometheus_token":"metrics-fixture","grafana_cloud_loki_token":"logs-fixture"}`},
+		{"YAML", `---
+# Grafana Cloud credentials
+grafana_cloud_prometheus_token: metrics-fixture
+grafana_cloud_loki_token: "logs-fixture" # Token for Alloy
+grafana_cloud_loki_url: https://logs.example.invalid
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := t.TempDir()
+			runner, err := (&replacementAnsible{}).withVaultPassword(work, "vault-test-password")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info, err := os.Stat(runner.vaultPasswordFile); err != nil || info.Mode().Perm() != 0o600 {
+				t.Fatal("the password file must be readable only by its owner")
+			}
+			encryptedPath := filepath.Join(work, "fixture.vault")
+			cmd := exec.CommandContext(t.Context(), "ansible-vault", "encrypt", "--output", encryptedPath)
+			cmd.Dir, cmd.Env, cmd.Stdin = work, runner.environment(work), strings.NewReader(tc.payload)
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("could not encrypt fixture: %v", err)
+			}
+			encrypted, err := os.ReadFile(encryptedPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tokens, err := runner.readAlloyVault(t.Context(), work, string(encrypted))
+			if err != nil || len(tokens) != 2 || tokens["grafana_cloud_prometheus_token"] != "metrics-fixture" || tokens["grafana_cloud_loki_token"] != "logs-fixture" {
+				t.Fatalf("could not decrypt Vault tokens: %v", err)
+			}
+			invalid, err := runner.withVaultPassword(work, "incorrect-password")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tokens, err := invalid.readAlloyVault(t.Context(), work, string(encrypted)); err == nil || tokens != nil || strings.Contains(err.Error(), "incorrect-password") {
+				t.Fatal("a bad Vault password must fail without disclosing it")
+			}
+		})
 	}
-	if info, err := os.Stat(runner.vaultPasswordFile); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatal("the password file must be readable only by its owner")
+}
+
+func TestParseAlloyVaultReadsYAML(t *testing.T) {
+	const payload = `---
+logs_token: &logs "logs-fixture"
+grafana_cloud_loki_token: *logs
+grafana_cloud_prometheus_token: 'metrics-fixture'
+`
+	tokens, err := parseAlloyVault([]byte(payload))
+	if err != nil || len(tokens) != 2 || tokens["grafana_cloud_prometheus_token"] != "metrics-fixture" || tokens["grafana_cloud_loki_token"] != "logs-fixture" {
+		t.Fatalf("could not parse YAML Vault tokens: %v", err)
 	}
-	const payload = `{"grafana_cloud_prometheus_token":"metrics-fixture","grafana_cloud_loki_token":"logs-fixture"}`
-	encryptedPath := filepath.Join(work, "fixture.vault")
-	cmd := exec.CommandContext(t.Context(), "ansible-vault", "encrypt", "--output", encryptedPath)
-	cmd.Dir, cmd.Env, cmd.Stdin = work, runner.environment(work), strings.NewReader(payload)
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("could not encrypt fixture: %v", err)
-	}
-	encrypted, err := os.ReadFile(encryptedPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tokens, err := runner.readAlloyVault(t.Context(), work, string(encrypted))
-	if err != nil || tokens["grafana_cloud_prometheus_token"] != "metrics-fixture" || tokens["grafana_cloud_loki_token"] != "logs-fixture" {
-		t.Fatalf("could not decrypt Vault tokens: %v", err)
-	}
-	invalid, err := runner.withVaultPassword(work, "incorrect-password")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tokens, err := invalid.readAlloyVault(t.Context(), work, string(encrypted)); err == nil || tokens != nil || strings.Contains(err.Error(), "incorrect-password") {
-		t.Fatal("a bad Vault password must fail without disclosing it")
+}
+
+func TestParseAlloyVaultRejectsInvalidYAML(t *testing.T) {
+	for _, tc := range []struct{ name, rest string }{
+		{"missing token", ""},
+		{"empty token", "grafana_cloud_loki_token: ''\n"},
+		{"numeric token", "grafana_cloud_loki_token: 12345\n"},
+		{"invalid characters", "grafana_cloud_loki_token: 'a b'\n"},
+		{"multiple documents", "grafana_cloud_loki_token: logs-fixture\n---\nextra: value\n"},
+		{"malformed YAML", "grafana_cloud_loki_token: [\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const prefix = "grafana_cloud_prometheus_token: secret-fixture\n"
+			tokens, err := parseAlloyVault([]byte(prefix + tc.rest))
+			if err == nil || tokens != nil || strings.Contains(err.Error(), "secret-fixture") {
+				t.Fatal("invalid input must fail without disclosing tokens")
+			}
+		})
 	}
 }
 

@@ -1,14 +1,18 @@
 package guard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 const (
@@ -71,18 +75,43 @@ func (a *replacementAnsible) readAlloyVault(ctx context.Context, work, encrypted
 		}
 		return nil, errors.New("не удалось расшифровать Vault-файл Grafana. Проверьте файл и пароль в настройках Ansible")
 	}
-	var tokens struct {
+	return parseAlloyVault(plain)
+}
+
+func parseAlloyVault(plain []byte) (map[string]string, error) {
+	formatError := errors.New("в расшифрованном Vault-файле Grafana укажите YAML или JSON с непустыми строковыми токенами grafana_cloud_prometheus_token и grafana_cloud_loki_token")
+	var jsonTokens struct {
 		Prometheus string `json:"grafana_cloud_prometheus_token"`
 		Loki       string `json:"grafana_cloud_loki_token"`
 	}
-	if json.Unmarshal(plain, &tokens) != nil || len(tokens.Prometheus) > 4096 || len(tokens.Loki) > 4096 ||
-		!grafanaToken.MatchString(tokens.Prometheus) || !grafanaToken.MatchString(tokens.Loki) {
-		return nil, errors.New("в Vault-файле Grafana укажите JSON с grafana_cloud_prometheus_token и grafana_cloud_loki_token")
+	jsonErr := json.Unmarshal(plain, &jsonTokens)
+	tokens := map[string]string{
+		"grafana_cloud_prometheus_token": jsonTokens.Prometheus,
+		"grafana_cloud_loki_token":       jsonTokens.Loki,
 	}
-	return map[string]string{
-		"grafana_cloud_prometheus_token": tokens.Prometheus,
-		"grafana_cloud_loki_token":       tokens.Loki,
-	}, nil
+	if jsonErr != nil {
+		var values map[string]yaml.Node
+		decoder := yaml.NewDecoder(bytes.NewReader(plain))
+		if decoder.Decode(&values) != nil || decoder.Decode(&yaml.Node{}) != io.EOF {
+			return nil, formatError
+		}
+		for key := range tokens {
+			value := values[key]
+			if value.Kind == yaml.AliasNode {
+				value = *value.Alias
+			}
+			if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" {
+				return nil, formatError
+			}
+			tokens[key] = value.Value
+		}
+	}
+	for _, token := range tokens {
+		if len(token) > 4096 || !grafanaToken.MatchString(token) {
+			return nil, formatError
+		}
+	}
+	return tokens, nil
 }
 
 func (a *replacementAnsible) stageManagedLoginKey(ctx context.Context, path string) error {
