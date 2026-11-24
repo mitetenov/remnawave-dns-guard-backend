@@ -38,14 +38,16 @@ func TestAnsibleAlloyVaultDecryptsUsingSavedPassword(t *testing.T) {
 	if _, err := exec.LookPath("ansible-vault"); err != nil {
 		t.Skip("ansible-vault is unavailable")
 	}
-	for _, tc := range []struct{ name, payload string }{
-		{"JSON", `{"grafana_cloud_prometheus_token":"metrics-fixture","grafana_cloud_loki_token":"logs-fixture"}`},
+	for _, tc := range []struct{ name, payload, wantLoki string }{
+		{"JSON", `{"grafana_cloud_prometheus_token":"metrics-fixture","grafana_cloud_loki_token":"logs-fixture"}`, "logs-fixture"},
 		{"YAML", `---
 # Grafana Cloud credentials
 grafana_cloud_prometheus_token: metrics-fixture
 grafana_cloud_loki_token: "logs-fixture" # Token for Alloy
 grafana_cloud_loki_url: https://logs.example.invalid
-`},
+`, "logs-fixture"},
+		{"assignments", "grafana_cloud_prometheus_token=metrics-fixture\ngrafana_cloud_loki_token=logs-fixture\n", "logs-fixture"},
+		{"Ansible shared token", "common_alloy_grafana_token: 'metrics-fixture'\n", "metrics-fixture"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			work := t.TempDir()
@@ -67,7 +69,7 @@ grafana_cloud_loki_url: https://logs.example.invalid
 				t.Fatal(err)
 			}
 			tokens, err := runner.readAlloyVault(t.Context(), work, string(encrypted))
-			if err != nil || len(tokens) != 2 || tokens["grafana_cloud_prometheus_token"] != "metrics-fixture" || tokens["grafana_cloud_loki_token"] != "logs-fixture" {
+			if err != nil || len(tokens) != 2 || tokens[grafanaPrometheusKey] != "metrics-fixture" || tokens[grafanaLokiKey] != tc.wantLoki {
 				t.Fatalf("could not decrypt Vault tokens: %v", err)
 			}
 			invalid, err := runner.withVaultPassword(work, "incorrect-password")
@@ -90,6 +92,47 @@ grafana_cloud_prometheus_token: 'metrics-fixture'
 	tokens, err := parseAlloyVault([]byte(payload))
 	if err != nil || len(tokens) != 2 || tokens["grafana_cloud_prometheus_token"] != "metrics-fixture" || tokens["grafana_cloud_loki_token"] != "logs-fixture" {
 		t.Fatalf("could not parse YAML Vault tokens: %v", err)
+	}
+}
+
+func TestParseAlloyVaultReadsSharedToken(t *testing.T) {
+	for _, tc := range []struct{ name, payload string }{
+		{"Ansible YAML", "common_alloy_grafana_token: 'shared-fixture'\n"},
+		{"JSON", `{"common_alloy_grafana_token":"shared-fixture"}`},
+		{"assignment", "common_alloy_grafana_token=shared-fixture\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tokens, err := parseAlloyVault([]byte(tc.payload))
+			if err != nil || len(tokens) != 2 || tokens[grafanaPrometheusKey] != "shared-fixture" || tokens[grafanaLokiKey] != "shared-fixture" {
+				t.Fatalf("could not parse a shared Vault token: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseAlloyVaultReadsAssignments(t *testing.T) {
+	const payload = "# Grafana Cloud\r\n\r\ngrafana_cloud_prometheus_token = metrics-fixture==\r\ngrafana_cloud_loki_token='logs-fixture='"
+	tokens, err := parseAlloyVault([]byte(payload))
+	if err != nil || len(tokens) != 2 || tokens[grafanaPrometheusKey] != "metrics-fixture==" || tokens[grafanaLokiKey] != "logs-fixture=" {
+		t.Fatalf("could not parse Vault token assignments: %v", err)
+	}
+}
+
+func TestParseAlloyVaultRejectsInvalidAssignments(t *testing.T) {
+	for _, tc := range []struct{ name, rest string }{
+		{"missing token", ""},
+		{"empty token", "grafana_cloud_loki_token=\n"},
+		{"duplicate token", "grafana_cloud_loki_token=logs-fixture\ngrafana_cloud_loki_token=other-fixture\n"},
+		{"malformed line", "grafana_cloud_loki_token logs-fixture\n"},
+		{"invalid characters", "grafana_cloud_loki_token='logs fixture'\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const prefix = "grafana_cloud_prometheus_token=secret-fixture\n"
+			tokens, err := parseAlloyVault([]byte(prefix + tc.rest))
+			if err == nil || tokens != nil || strings.Contains(err.Error(), "secret-fixture") {
+				t.Fatal("invalid input must fail without disclosing tokens")
+			}
+		})
 	}
 }
 

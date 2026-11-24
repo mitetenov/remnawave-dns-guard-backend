@@ -19,6 +19,9 @@ const (
 	ansibleVaultPasswordKey  = "ansible_vault_password"
 	ansibleVaultVariablesKey = "ansible_vault_variables"
 	ansibleSSHKey            = "ansible_ssh_private_key"
+	grafanaSharedKey         = "common_alloy_grafana_token"
+	grafanaPrometheusKey     = "grafana_cloud_prometheus_token"
+	grafanaLokiKey           = "grafana_cloud_loki_token"
 )
 
 var (
@@ -79,39 +82,81 @@ func (a *replacementAnsible) readAlloyVault(ctx context.Context, work, encrypted
 }
 
 func parseAlloyVault(plain []byte) (map[string]string, error) {
-	formatError := errors.New("в расшифрованном Vault-файле Grafana укажите YAML или JSON с непустыми строковыми токенами grafana_cloud_prometheus_token и grafana_cloud_loki_token")
+	formatError := errors.New("в расшифрованном Vault-файле Grafana укажите общий токен common_alloy_grafana_token или оба токена grafana_cloud_prometheus_token и grafana_cloud_loki_token. Допустимые форматы YAML, JSON и строки ключ=значение")
 	var jsonTokens struct {
+		Shared     string `json:"common_alloy_grafana_token"`
 		Prometheus string `json:"grafana_cloud_prometheus_token"`
 		Loki       string `json:"grafana_cloud_loki_token"`
 	}
 	jsonErr := json.Unmarshal(plain, &jsonTokens)
 	tokens := map[string]string{
-		"grafana_cloud_prometheus_token": jsonTokens.Prometheus,
-		"grafana_cloud_loki_token":       jsonTokens.Loki,
+		grafanaSharedKey:     jsonTokens.Shared,
+		grafanaPrometheusKey: jsonTokens.Prometheus,
+		grafanaLokiKey:       jsonTokens.Loki,
 	}
 	if jsonErr != nil {
-		var values map[string]yaml.Node
-		decoder := yaml.NewDecoder(bytes.NewReader(plain))
-		if decoder.Decode(&values) != nil || decoder.Decode(&yaml.Node{}) != io.EOF {
-			return nil, formatError
-		}
-		for key := range tokens {
-			value := values[key]
-			if value.Kind == yaml.AliasNode {
-				value = *value.Alias
-			}
-			if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" {
-				return nil, formatError
-			}
-			tokens[key] = value.Value
+		tokens = parseAlloyVaultYAML(plain)
+		if tokens == nil {
+			tokens = parseAlloyVaultAssignments(plain)
 		}
 	}
-	for _, token := range tokens {
+	prometheus, loki := tokens[grafanaPrometheusKey], tokens[grafanaLokiKey]
+	if prometheus == "" && loki == "" {
+		prometheus, loki = tokens[grafanaSharedKey], tokens[grafanaSharedKey]
+	}
+	for _, token := range []string{prometheus, loki} {
 		if len(token) > 4096 || !grafanaToken.MatchString(token) {
 			return nil, formatError
 		}
 	}
-	return tokens, nil
+	return map[string]string{grafanaPrometheusKey: prometheus, grafanaLokiKey: loki}, nil
+}
+
+func parseAlloyVaultYAML(plain []byte) map[string]string {
+	var values map[string]yaml.Node
+	decoder := yaml.NewDecoder(bytes.NewReader(plain))
+	if decoder.Decode(&values) != nil || decoder.Decode(&yaml.Node{}) != io.EOF {
+		return nil
+	}
+	tokens := make(map[string]string, 3)
+	for _, key := range []string{grafanaSharedKey, grafanaPrometheusKey, grafanaLokiKey} {
+		value, exists := values[key]
+		if !exists {
+			continue
+		}
+		if value.Kind == yaml.AliasNode {
+			value = *value.Alias
+		}
+		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" {
+			return nil
+		}
+		tokens[key] = value.Value
+	}
+	return tokens
+}
+
+func parseAlloyVaultAssignments(plain []byte) map[string]string {
+	tokens := make(map[string]string, 3)
+	for rawLine := range strings.SplitSeq(string(plain), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !ok || (key != grafanaSharedKey && key != grafanaPrometheusKey && key != grafanaLokiKey) {
+			return nil
+		}
+		if _, exists := tokens[key]; exists {
+			return nil
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && (value[0] == '\'' || value[0] == '"') && value[0] == value[len(value)-1] {
+			value = value[1 : len(value)-1]
+		}
+		tokens[key] = value
+	}
+	return tokens
 }
 
 func (a *replacementAnsible) stageManagedLoginKey(ctx context.Context, path string) error {
