@@ -22,7 +22,9 @@ RUN apk add --no-cache ansible-core ca-certificates git
 WORKDIR /opt/dns-guard/ansible
 # Export the node deployment assets and replace the upstream Grafana tokens
 # before this build step writes a layer.
-RUN --mount=type=secret,id=ansible_repo_token,required=true set -eu; \
+# Install the bundled SSH transition, which uses the runner's pinned host key.
+RUN --mount=type=secret,id=ansible_repo_token,required=true \
+    --mount=type=bind,source=ansible-bundle,target=/tmp/dns-guard-ansible set -eu; \
     source_dir=$(mktemp -d); \
     trap 'rm -rf "$source_dir"' EXIT; \
     git -C "$source_dir" init -q; \
@@ -37,6 +39,14 @@ RUN --mount=type=secret,id=ansible_repo_token,required=true set -eu; \
         roles/docker roles/ssl roles/stack_nodes roles/warp_native \
         files/nodes/docker-compose.yml files/nodes/html; \
     tar -xf "$source_dir/node-assets.tar"; \
+    for playbook in playbooks/nodes.yml playbooks/nodes-wl.yml; do \
+        awk '/^    - name: Switch from the initial port to the managed SSH port$/ { skip=1 } \
+             skip && /^    - name: Configure native WARP$/ { skip=0; replaced=1 } \
+             !skip { print } END { if (!replaced || skip) exit 1 }' \
+            "$playbook" > "$source_dir/playbook.yml"; \
+        mv "$source_dir/playbook.yml" "$playbook"; \
+    done; \
+    cp /tmp/dns-guard-ansible/ssh.yml /tmp/dns-guard-ansible/dns-guard-reload-ssh.yml roles/common/tasks/; \
     alloy=roles/common/templates/alloy/config.alloy.j2; \
     test "$(grep -Ec '^[[:space:]]*password[[:space:]]*=' "$alloy")" -eq 2; \
     sed -i \

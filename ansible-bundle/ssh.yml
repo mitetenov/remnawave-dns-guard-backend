@@ -1,0 +1,48 @@
+- name: Configure the managed SSH port
+  when:
+    - ansible_facts['os_family'] == 'Debian'
+    - node_ssh_listen_port is defined
+  block:
+    - name: Enable the managed port alongside the initial port
+      when:
+        - node_selected_ssh_port | int != node_ssh_listen_port | int
+        - not ansible_check_mode
+      block:
+        - name: Keep both SSH ports available during the transition
+          ansible.builtin.copy:
+            dest: /etc/ssh/sshd_config.d/99-ansible-port.conf
+            content: |
+              Port {{ node_selected_ssh_port | int }}
+              Port {{ node_ssh_listen_port | int }}
+            mode: '0644'
+
+        - name: Apply the temporary SSH configuration
+          ansible.builtin.import_tasks: dns-guard-reload-ssh.yml
+
+        - name: Use the managed SSH port
+          ansible.builtin.set_fact:
+            ansible_port: "{{ node_ssh_listen_port | int }}"
+
+        - name: Authenticate on the managed port before retiring the initial port
+          ansible.builtin.wait_for_connection:
+            connect_timeout: 3
+            timeout: 60
+
+    - name: Keep only the managed SSH port in the configuration
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-ansible-port.conf
+        content: "Port {{ node_ssh_listen_port | int }}\n"
+        mode: '0644'
+
+    # Apply even when the file is unchanged. A previous attempt can write it
+    # and stop before reloading the service.
+    - name: Apply and verify the final SSH configuration
+      when: not ansible_check_mode
+      block:
+        - name: Apply the final SSH configuration
+          ansible.builtin.import_tasks: dns-guard-reload-ssh.yml
+
+        - name: Verify the managed SSH connection
+          ansible.builtin.wait_for_connection:
+            connect_timeout: 3
+            timeout: 60

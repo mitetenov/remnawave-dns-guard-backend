@@ -1,0 +1,23 @@
+- name: Validate the SSH daemon configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+
+- name: Check whether SSH uses systemd socket activation
+  ansible.builtin.command: systemctl is-active --quiet ssh.socket
+  register: dns_guard_ssh_socket
+  changed_when: false
+  failed_when: false
+  when: ansible_facts['service_mgr'] == 'systemd'
+
+- name: Reload the SSH service
+  ansible.builtin.service:
+    name: ssh
+    state: reloaded
+  when: dns_guard_ssh_socket.rc | default(1) != 0
+
+- name: Restart the SSH socket with the configured ports
+  ansible.builtin.systemd_service:
+    name: ssh.socket
+    state: restarted
+    daemon_reload: true
+  when: dns_guard_ssh_socket.rc | default(1) == 0
