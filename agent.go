@@ -34,6 +34,7 @@ func supportsHysteria2(version string) bool  { return agentVersionAtLeast(versio
 func supportsProbeProfile(version string, profile Profile) bool {
 	return (profile.Protocol != "hysteria2" || supportsHysteria2(version)) &&
 		(profile.Congestion == "" || agentVersionAtLeast(version, 7)) &&
+		(profile.VLESSFragment == nil || agentVersionAtLeast(version, 8)) &&
 		(len(profile.XHTTPExtra) == 0 || supportsXHTTPExtra(version)) &&
 		(len(profile.ALPN) == 0 || supportsALPN(version))
 }
