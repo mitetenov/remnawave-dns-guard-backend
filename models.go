@@ -43,26 +43,27 @@ type TargetInput struct {
 	RemnawaveUUID *string `json:"remnawave_uuid"`
 }
 type Profile struct {
-	Protocol     string          `json:"protocol,omitempty"`
-	Password     string          `json:"password,omitempty"`
-	Obfs         string          `json:"obfs,omitempty"`
-	ObfsPassword string          `json:"obfs_password,omitempty"`
-	PinSHA256    string          `json:"pin_sha256,omitempty"`
-	Congestion   string          `json:"hysteria_congestion,omitempty"`
-	Port         int             `json:"port"`
-	UUID         string          `json:"uuid"`
-	Transport    string          `json:"transport"`
-	Security     string          `json:"security"`
-	ServerName   string          `json:"server_name"`
-	PublicKey    string          `json:"public_key"`
-	ShortID      string          `json:"short_id"`
-	Flow         string          `json:"flow"`
-	Fingerprint  string          `json:"fingerprint"`
-	Path         string          `json:"path"`
-	Host         string          `json:"host"`
-	XHTTPMode    string          `json:"xhttp_mode"`
-	XHTTPExtra   json.RawMessage `json:"xhttp_extra,omitempty"`
-	ALPN         []string        `json:"alpn,omitempty"`
+	Protocol      string            `json:"protocol,omitempty"`
+	Password      string            `json:"password,omitempty"`
+	Obfs          string            `json:"obfs,omitempty"`
+	ObfsPassword  string            `json:"obfs_password,omitempty"`
+	PinSHA256     string            `json:"pin_sha256,omitempty"`
+	Congestion    string            `json:"hysteria_congestion,omitempty"`
+	Port          int               `json:"port"`
+	UUID          string            `json:"uuid"`
+	Transport     string            `json:"transport"`
+	Security      string            `json:"security"`
+	ServerName    string            `json:"server_name"`
+	PublicKey     string            `json:"public_key"`
+	ShortID       string            `json:"short_id"`
+	Flow          string            `json:"flow"`
+	Fingerprint   string            `json:"fingerprint"`
+	Path          string            `json:"path"`
+	Host          string            `json:"host"`
+	XHTTPMode     string            `json:"xhttp_mode"`
+	XHTTPExtra    json.RawMessage   `json:"xhttp_extra,omitempty"`
+	ALPN          []string          `json:"alpn,omitempty"`
+	VLESSFragment map[string]string `json:"vless_fragment,omitempty"`
 }
 
 func defaultProfile() Profile { return Profile{Fingerprint: "chrome", Path: "/", XHTTPMode: "auto"} }
@@ -160,6 +161,9 @@ func validateProfile(p *Profile) {
 	}
 	if !validXHTTPExtra(p.XHTTPExtra, p.Transport, p.XHTTPMode) {
 		invalid("xhttp_extra")
+	}
+	if !validVLESSFragment(p.VLESSFragment, p.Protocol, p.Transport) {
+		invalid("vless_fragment")
 	}
 	if p.Congestion != "" && (p.Protocol != "hysteria2" || !oneOf(p.Congestion, "bbr", "reno", "brutal")) {
 		invalid("hysteria_congestion")
